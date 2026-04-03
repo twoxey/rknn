@@ -1,97 +1,83 @@
-#include <stdbool.h>
-#include <stdio.h>
-#include <errno.h>
-#include <string.h>
+#include "camera.h"
+#include "yolo11.h"
+#include "stb_image.h"
 
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/videodev2.h>
+bool load_jpeg_image_from_memory(const unsigned char* buf, size_t len, image_buffer_t* image) {
+    *image = (image_buffer_t){};
+
+    int w, h, c;
+    stbi_uc *pixeldata = stbi_load_from_memory(buf, len, &w, &h, &c, 0);
+    if (!pixeldata) {
+        printf("error: failed to load jpeg image from memory\n");
+        return false;
+    }
+
+    //int size = w * h * c;
+    image->virt_addr = pixeldata;
+    image->width = w;
+    image->height = h;
+    if (c == 4) {
+        image->format = IMAGE_FORMAT_RGBA8888;
+    } else if (c == 1) {
+        image->format = IMAGE_FORMAT_GRAY8;
+    } else {
+        image->format = IMAGE_FORMAT_RGB888;
+    }
+    return true;
+}
 
 int main(void) {
-    const char* device_name = "/dev/video0";
-    fprintf(stderr, "Opening device: '%s'\n", device_name);
+    const char* model_path = "yolo11.rknn";
 
-    int fd = open(device_name, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "Failed to open device '%s': %s\n", device_name, strerror(errno));
-        return 1;
-    }
-
-    struct v4l2_capability caps = {};
-    int ret = ioctl(fd, VIDIOC_QUERYCAP, &caps);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to query device capability: %s\n", strerror(errno));
+    rknn_app_context_t rknn_app_ctx = {};
+    int ret = init_yolo11_model(model_path, &rknn_app_ctx);
+    if (ret != 0) {
+        printf("init_yolo11_model fail! ret=%d model_path=%s\n", ret, model_path);
         goto end;
     }
 
-    fprintf(stderr, "Device driver: %s\n", caps.driver);
-    fprintf(stderr, "Device name: %s\n", caps.card);
-    fprintf(stderr, "Device location: %s\n", caps.bus_info);
-    fprintf(stderr, "Driver version: %u\n", caps.version);
+    struct camera cam;
+    if (!camera_init(&cam, "/dev/video0")) goto end;
 
-    if (!(caps.capabilities & V4L2_CAP_DEVICE_CAPS)) {
-        fprintf(stderr, "V4L2_CAP_DEVICE_CAPS flag not set.\n");
-        goto end;
+    while (true) {
+        struct mapped_buffer buffer;
+        int index = camera_dequeue_buffer(&cam, &buffer);
+        if (index < 0) break;
+
+        image_buffer_t image;
+        if (!load_jpeg_image_from_memory((unsigned char*)buffer.start, buffer.length, &image)) break;
+
+        if (!camera_queue_buffer(&cam, index)) break;
+
+        object_detect_result_list od_results;
+        int ret = inference_yolo11_model(&rknn_app_ctx, &image, &od_results);
+        if (ret != 0) {
+            printf("init_yolo11_model fail! ret=%d\n", ret);
+            break;
+        }
+
+        printf("od result count: %d\n", od_results.count);
+        for (int i = 0; i < od_results.count; i++) {
+            object_detect_result *det_result = &(od_results.results[i]);
+            printf("  id: %d @ (%d %d %d %d) %.3f\n",
+                   det_result->cls_id,
+                   det_result->box.left, det_result->box.top,
+                   det_result->box.right, det_result->box.bottom,
+                   det_result->prop);
+        }
+
+        if (image.virt_addr) {
+            free(image.virt_addr);
+        }
     }
-
-    bool supports_video_capture = caps.device_caps & V4L2_CAP_VIDEO_CAPTURE;
-    bool supports_read_write_io = caps.device_caps & V4L2_CAP_READWRITE;
-    bool supports_async_io      = caps.device_caps & V4L2_CAP_ASYNCIO;
-    bool supports_streaming     = caps.device_caps & V4L2_CAP_STREAMING;
-
-    fprintf(stderr, "  V4L2_CAP_VIDEO_CAPTURE: %u\n", supports_video_capture);
-    fprintf(stderr, "  V4L2_CAP_READWRITE:     %u\n", supports_read_write_io);
-    fprintf(stderr, "  V4L2_CAP_ASYNCIO:       %u\n", supports_async_io);
-    fprintf(stderr, "  V4L2_CAP_STREAMING:     %u\n", supports_streaming);
-
-    if (!supports_video_capture) {
-        fprintf(stderr, "'%s' is not a video capture device\n", device_name);
-        goto end;
-    }
-
-    struct v4l2_format fmt = {};
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ret = ioctl(fd, VIDIOC_G_FMT, &fmt);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to get device pixel format: %s\n", strerror(errno));
-        goto end;
-    }
-
-    __u32 format = fmt.fmt.pix.pixelformat;
-    __u32 image_size = fmt.fmt.pix.sizeimage;
-
-    fprintf(stderr, "Format:\n");
-    fprintf(stderr, "  type:  %u\n", fmt.type);
-    fprintf(stderr, "  width:  %u\n", fmt.fmt.pix.width);
-    fprintf(stderr, "  height: %u\n", fmt.fmt.pix.height);
-    fprintf(stderr, "  format: %c%c%c%c\n", format, format >> 8, format >> 16, format >> 24);
-    fprintf(stderr, "  field: %d\n", fmt.fmt.pix.field);
-    fprintf(stderr, "  bytesperline: %d\n", fmt.fmt.pix.bytesperline);
-    fprintf(stderr, "  sizeimage: %d\n", fmt.fmt.pix.sizeimage);
-    fprintf(stderr, "  colorspace: %d\n", fmt.fmt.pix.colorspace);
-    fprintf(stderr, "  priv: %d\n", fmt.fmt.pix.priv == V4L2_PIX_FMT_PRIV_MAGIC);
-
-    if (format != V4L2_PIX_FMT_MJPEG) {
-        fprintf(stderr, "Only supports pixel format V4L2_PIX_FMT_MJPEG for now\n");
-        goto end;
-    }
-
-    struct v4l2_requestbuffers request = {};
-    request.count = 1;
-    request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    request.memory = V4L2_MEMORY_DMABUF;
-
-    ret = ioctl(fd, VIDIOC_REQBUFS, &request);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to get DMA buffer from device: %s\n", strerror(errno));
-        goto end;
-    }
-
-    fprintf(stderr, "Successfully requested DMA buffers from device\n");
 
 end:
-    close(fd);
+    camera_deinit(&cam);
+
+    ret = release_yolo11_model(&rknn_app_ctx);
+    if (ret != 0) {
+        printf("release_yolo11_model fail! ret=%d\n", ret);
+    }
 
     return 0;
 }

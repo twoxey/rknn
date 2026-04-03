@@ -2,7 +2,6 @@
 #define _RKNN_YOLO11_DEMO_POSTPROCESS_H_
 
 #include <stdint.h>
-#include <vector>
 #include "rknn_api.h"
 #include "common.h"
 #include "image_utils.h"

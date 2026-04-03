@@ -1,4 +1,32 @@
 #include <stdbool.h>
+#include <stddef.h>
+
+#define PIX_FMT_PRI "%c%c%c%c"
+#define PIX_FMT_ARG(f) (f), (f)>>8, (f)>>16, (f)>>24
+
+struct mapped_buffer {
+    void* start;
+    size_t length;
+};
+
+struct camera {
+    bool started;
+    int fd;
+    struct mapped_buffer buffers[4];
+    unsigned int mapped_buffer_count;
+};
+
+bool camera_init(struct camera* cam, const char* device_name);
+void camera_deinit(struct camera* cam);
+bool camera_start_streaming(struct camera* cam);
+bool camera_stop_streaming(struct camera* cam);
+int  camera_dequeue_buffer(struct camera* cam, struct mapped_buffer* buffer);
+bool camera_queue_buffer(struct camera* cam, int index);
+
+//
+// Implementation
+//
+
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
@@ -7,10 +35,8 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <linux/videodev2.h>
-
-#define PIX_FMT_PRI "%c%c%c%c"
-#define PIX_FMT_ARG(f) (f), (f)>>8, (f)>>16, (f)>>24
 
 int open_video_capture_device(const char* device_name) {
     int fd = open(device_name, O_RDWR);
@@ -88,12 +114,14 @@ void enumerate_and_select_frame_size(int fd, struct v4l2_pix_format* pix) {
 
     fprintf(stderr, "Select a frame size: ");
     int ch = getchar();
-    getchar(); // drop LF
-    if (ch < '0' || ch > '9') {
-        fprintf(stderr, "Expects a character from 0-9\n");
-        goto end;
+    if (ch != '\n') {
+        getchar(); // drop LF
+        if (ch < '0' || ch > '9') {
+            fprintf(stderr, "Expects a character from 0-9, got %c (%u)\n", ch, ch);
+            goto end;
+        }
+        selected_index = ch - '0';
     }
-    selected_index = ch - '0';
     if (selected_index >= supported_size_count) {
         fprintf(stderr, "Selected index out of bounce\n");
         goto end;
@@ -150,12 +178,14 @@ struct v4l2_fract enumerate_and_select_frame_interval(int fd, struct v4l2_pix_fo
 
     fprintf(stderr, "Select a frame interval: ");
     int ch = getchar();
-    getchar(); // drop LF
-    if (ch < '0' || ch > '9') {
-        fprintf(stderr, "Expects a character from 0-9, got %c (%u)\n", ch, ch);
-        goto end;
+    if (ch != '\n') {
+        getchar(); // drop LF
+        if (ch < '0' || ch > '9') {
+            fprintf(stderr, "Expects a character from 0-9, got %c (%u)\n", ch, ch);
+            goto end;
+        }
+        selected_index = ch - '0';
     }
-    selected_index = ch - '0';
     if (selected_index >= supported_interval_count) {
         fprintf(stderr, "Selected index out of bounce\n");
         goto end;
@@ -188,11 +218,6 @@ bool video_capture_set_frame_interval(int fd, struct v4l2_fract* timeperframe) {
     *timeperframe = streamparm.parm.capture.timeperframe;
     return true;
 }
-
-struct mapped_buffer {
-    void* start;
-    size_t length;
-};
 
 void unmap_buffers(__u32 count, struct mapped_buffer* buffers) {
     for (__u32 i = 0; i < count; ++i) {
@@ -269,103 +294,123 @@ bool video_capture_dequeue_buffer(int fd, struct v4l2_buffer* buf) {
     return true;
 }
 
-int main(void) {
-    const char* device_name = "/dev/video0";
+bool camera_queue_buffer(struct camera* cam, int index){
+    if (index < 0) return false;
+    return video_capture_queue_buffer(cam->fd, index);
+}
 
-    fprintf(stderr, "Open device: %s\n", device_name);
-    int fd = open_video_capture_device(device_name);
-    if (fd >= 0) {
-        bool supports_mjpeg = false;
+int camera_dequeue_buffer(struct camera* cam, struct mapped_buffer* buffer){
+    struct v4l2_buffer buf = {};
+    if (!video_capture_dequeue_buffer(cam->fd, &buf)) {
+        return -1;
+    }
+    buffer->start = cam->buffers[buf.index].start;
+    buffer->length = buf.bytesused;
+    return buf.index;
+}
 
-        struct v4l2_fmtdesc fmtdesc = {};
-        fmtdesc.index = 0;
-        fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        while (ioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
-            fprintf(stderr, "Supported format: "PIX_FMT_PRI" (%s)\n", PIX_FMT_ARG(fmtdesc.pixelformat), fmtdesc.description);
-
-            if (fmtdesc.pixelformat == V4L2_PIX_FMT_MJPEG) {
-                supports_mjpeg = true;
-            }
-
-            ++fmtdesc.index;
-        }
-        if (errno != EINVAL) {
-            fprintf(stderr, "Failed to enumerate device supported formats: %s\n", strerror(errno));
-        }
-
-        if (!supports_mjpeg) {
-            fprintf(stderr, "Only supports pixel format V4L2_PIX_FMT_MJPEG for now\n");
-            goto close_device;
-        }
-
-        struct v4l2_pix_format pix = { .pixelformat = V4L2_PIX_FMT_MJPEG };
-
-        fprintf(stderr, "Using format: "PIX_FMT_PRI"\n", PIX_FMT_ARG(pix.pixelformat));
-
-        enumerate_and_select_frame_size(fd, &pix);
-
-        fprintf(stderr, "Selected frame size: %ux%u\n", pix.width, pix.height);
-
-        video_capture_set_pix_format(fd, &pix);
-
-        fprintf(stderr, "Current pixel format:\n");
-        fprintf(stderr, "  width:  %u\n", pix.width);
-        fprintf(stderr, "  height: %u\n", pix.height);
-        fprintf(stderr, "  format: "PIX_FMT_PRI"\n", PIX_FMT_ARG(pix.pixelformat));
-        fprintf(stderr, "  field: %d\n", pix.field);
-        fprintf(stderr, "  bytesperline: %d\n", pix.bytesperline);
-        fprintf(stderr, "  sizeimage: %d\n", pix.sizeimage);
-        fprintf(stderr, "  colorspace: %d\n", pix.colorspace);
-        fprintf(stderr, "  priv: %d\n", pix.priv == V4L2_PIX_FMT_PRIV_MAGIC);
-
-        if (pix.pixelformat != V4L2_PIX_FMT_MJPEG) {
-            fprintf(stderr, "Only supports pixel format V4L2_PIX_FMT_MJPEG for now\n");
-            goto close_device;
-        }
-
-        struct v4l2_fract timeperframe = enumerate_and_select_frame_interval(fd, pix);
-
-        video_capture_set_frame_interval(fd, &timeperframe);
-
-        float sec = (float)timeperframe.numerator   / (float)timeperframe.denominator;
-        float fps = (float)timeperframe.denominator / (float)timeperframe.numerator;
-        fprintf(stderr, "Current frame interval: %fsec, %ffps\n", sec, fps);
-
-        struct mapped_buffer buffers[4] = {};
-        __u32 buffer_count = video_capture_request_and_map_buffers(fd, sizeof(buffers)/sizeof(buffers[0]), buffers);
-
-        for (__u32 i = 0; i < buffer_count; ++i) {
-            if (!video_capture_queue_buffer(fd, i)) goto unmap_buffers;
-        }
-
-        if (ioctl(fd, VIDIOC_STREAMON, &(enum v4l2_buf_type){V4L2_BUF_TYPE_VIDEO_CAPTURE}) < 0) {
+bool camera_start_streaming(struct camera* cam) {
+    if (!cam->started) {
+        if (ioctl(cam->fd, VIDIOC_STREAMON, &(enum v4l2_buf_type){V4L2_BUF_TYPE_VIDEO_CAPTURE}) < 0) {
             fprintf(stderr, "Failed to start streaming: %s\n", strerror(errno));
-            goto unmap_buffers;
+            return false;
         }
+        cam->started = true;
+    }
+    return true;
+}
 
-        int frame_count = 30;
-        fprintf(stderr, "Read %d frames:\n", frame_count);
-        while (frame_count-- > 0) {
-            struct v4l2_buffer buf = {};
-            if (!video_capture_dequeue_buffer(fd, &buf)) break;
-
-            fprintf(stderr, "[%lu.%lu] got frame: buffer index = %u, bytes used: %u\n", buf.timestamp.tv_sec, buf.timestamp.tv_usec, buf.index, buf.bytesused);
-            if (!video_capture_queue_buffer(fd, buf.index)) break;
-        }
-
-        fprintf(stderr, "Stop streaming\n");
-        if (ioctl(fd, VIDIOC_STREAMOFF, &(enum v4l2_buf_type){V4L2_BUF_TYPE_VIDEO_CAPTURE}) < 0) {
+bool camera_stop_streaming(struct camera* cam) {
+    if (cam->started) {
+        if (ioctl(cam->fd, VIDIOC_STREAMOFF, &(enum v4l2_buf_type){V4L2_BUF_TYPE_VIDEO_CAPTURE}) < 0) {
             fprintf(stderr, "Failed to stop streaming: %s\n", strerror(errno));
+            return false;
+        }
+        cam->started = false;
+    }
+    return true;
+}
+
+void camera_deinit(struct camera* cam) {
+    camera_stop_streaming(cam);
+    unmap_buffers(cam->mapped_buffer_count, cam->buffers);
+    if (cam->fd >= 0) close(cam->fd);
+}
+
+bool camera_init(struct camera* cam, const char* device_name) {
+    fprintf(stderr, "Open device: %s\n", device_name);
+
+    *cam = (struct camera){};
+    cam->fd = open_video_capture_device(device_name);
+    if (cam->fd < 0) goto error;
+
+    bool supports_mjpeg = false;
+
+    struct v4l2_fmtdesc fmtdesc = {};
+    fmtdesc.index = 0;
+    fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    while (ioctl(cam->fd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
+        fprintf(stderr, "Supported format: "PIX_FMT_PRI" (%s)\n", PIX_FMT_ARG(fmtdesc.pixelformat), fmtdesc.description);
+
+        if (fmtdesc.pixelformat == V4L2_PIX_FMT_MJPEG) {
+            supports_mjpeg = true;
         }
 
-unmap_buffers:
-        unmap_buffers(buffer_count, buffers);
-
-close_device:
-        fprintf(stderr, "Closing device: %s\n", device_name);
-        close(fd);
+        ++fmtdesc.index;
+    }
+    if (errno != EINVAL) {
+        fprintf(stderr, "Failed to enumerate device supported formats: %s\n", strerror(errno));
     }
 
-    return 0;
+    if (!supports_mjpeg) {
+        fprintf(stderr, "Only supports pixel format V4L2_PIX_FMT_MJPEG for now\n");
+        goto error;
+    }
+
+    struct v4l2_pix_format pix = { .pixelformat = V4L2_PIX_FMT_MJPEG };
+
+    fprintf(stderr, "Using format: "PIX_FMT_PRI"\n", PIX_FMT_ARG(pix.pixelformat));
+
+    enumerate_and_select_frame_size(cam->fd, &pix);
+
+    fprintf(stderr, "Selected frame size: %ux%u\n", pix.width, pix.height);
+
+    video_capture_set_pix_format(cam->fd, &pix);
+
+    fprintf(stderr, "Current pixel format:\n");
+    fprintf(stderr, "  width:  %u\n", pix.width);
+    fprintf(stderr, "  height: %u\n", pix.height);
+    fprintf(stderr, "  format: "PIX_FMT_PRI"\n", PIX_FMT_ARG(pix.pixelformat));
+    fprintf(stderr, "  field: %d\n", pix.field);
+    fprintf(stderr, "  bytesperline: %d\n", pix.bytesperline);
+    fprintf(stderr, "  sizeimage: %d\n", pix.sizeimage);
+    fprintf(stderr, "  colorspace: %d\n", pix.colorspace);
+    fprintf(stderr, "  priv: %d\n", pix.priv == V4L2_PIX_FMT_PRIV_MAGIC);
+
+    if (pix.pixelformat != V4L2_PIX_FMT_MJPEG) {
+        fprintf(stderr, "Only supports pixel format V4L2_PIX_FMT_MJPEG for now\n");
+        goto error;
+    }
+
+    struct v4l2_fract timeperframe = enumerate_and_select_frame_interval(cam->fd, pix);
+
+    video_capture_set_frame_interval(cam->fd, &timeperframe);
+
+    float sec = (float)timeperframe.numerator   / (float)timeperframe.denominator;
+    float fps = (float)timeperframe.denominator / (float)timeperframe.numerator;
+    fprintf(stderr, "Current frame interval: %fsec, %ffps\n", sec, fps);
+
+    cam->mapped_buffer_count = video_capture_request_and_map_buffers(cam->fd, sizeof(cam->buffers)/sizeof(cam->buffers[0]), cam->buffers);
+    for (__u32 i = 0; i < cam->mapped_buffer_count; ++i) {
+        if (!video_capture_queue_buffer(cam->fd, i)) goto error;
+    }
+
+    if (!camera_start_streaming(cam)) goto error;
+
+    return true;
+
+error:
+    camera_deinit(cam);
+    return false;
 }
 
