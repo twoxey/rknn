@@ -668,18 +668,12 @@ int init_post_process(const char *label_name_txt_path)
 
 char *coco_cls_to_name(int cls_id)
 {
-
-    if (cls_id >= OBJ_CLASS_NUM)
-    {
-        return "null";
-    }
-
-    if (labels[cls_id])
+    if (cls_id < OBJ_CLASS_NUM && labels[cls_id])
     {
         return labels[cls_id];
     }
 
-    return "null";
+    return (char*)"null";
 }
 
 void deinit_post_process()

@@ -193,7 +193,7 @@ static int read_image_raw(const char* path, image_buffer_t* image)
     }
     data[file_size] = 0;
     fseek(fp, 0, SEEK_SET);
-    if(file_size != fread(data, 1, file_size, fp)) {
+    if((size_t)file_size != fread(data, 1, file_size, fp)) {
         printf("fread %s fail!\n", path);
         free(data);
         return -1;
@@ -275,7 +275,7 @@ int write_image(const char* path, const image_buffer_t* img)
         return -1;
     }
 
-    if (strcmp(_ext, ".png") == 0 | strcmp(_ext, ".PNG") == 0) {
+    if (strcmp(_ext, ".png") == 0 || strcmp(_ext, ".PNG") == 0) {
         ret = stbi_write_png(path, width, height, channel, data, 0);
 
     } else if (strcmp(_ext, ".jpg") == 0 || strcmp(_ext, ".jpeg") == 0 || strcmp(_ext, ".JPG") == 0 ||
@@ -286,7 +286,7 @@ int write_image(const char* path, const image_buffer_t* img)
 #else
         ret = stbi_write_jpg(path, width, height, channel, data, quality);
 #endif
-    } else if (strcmp(_ext, ".data") == 0 | strcmp(_ext, ".DATA") == 0) {
+    } else if (strcmp(_ext, ".data") == 0 || strcmp(_ext, ".DATA") == 0) {
         int size = get_image_size(img);
         ret = write_data_to_file(path, data, size);
     } else {
@@ -474,7 +474,7 @@ static int get_rga_fmt(image_format_t fmt) {
     }
 }
 
-int get_image_size(image_buffer_t* image)
+int get_image_size(const image_buffer_t* image)
 {
     if (image == NULL) {
         return 0;
@@ -493,6 +493,7 @@ int get_image_size(image_buffer_t* image)
     default:
         break;
     }
+    return 0;
 }
 
 static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, image_rect_t* src_box, image_rect_t* dst_box, char color)

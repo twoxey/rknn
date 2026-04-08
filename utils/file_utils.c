@@ -15,7 +15,7 @@ unsigned char* load_model(const char* filename, int* model_size)
     int model_len = ftell(fp);
     unsigned char* model = (unsigned char*)malloc(model_len);
     fseek(fp, 0, SEEK_SET);
-    if (model_len != fread(model, 1, model_len, fp)) {
+    if ((size_t)model_len != fread(model, 1, model_len, fp)) {
         printf("fread %s fail!\n", filename);
         free(model);
         fclose(fp);
@@ -38,7 +38,7 @@ int read_data_from_file(const char *path, char **out_data)
     char *data = (char *)malloc(file_size+1);
     data[file_size] = 0;
     fseek(fp, 0, SEEK_SET);
-    if(file_size != fread(data, 1, file_size, fp)) {
+    if((size_t)file_size != fread(data, 1, file_size, fp)) {
         printf("fread %s fail!\n", path);
         free(data);
         fclose(fp);

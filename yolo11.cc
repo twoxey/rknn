@@ -68,7 +68,7 @@ int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx)
     printf("input tensors:\n");
     rknn_tensor_attr input_attrs[io_num.n_input];
     memset(input_attrs, 0, sizeof(input_attrs));
-    for (int i = 0; i < io_num.n_input; i++)
+    for (uint32_t i = 0; i < io_num.n_input; i++)
     {
         input_attrs[i].index = i;
         ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
@@ -84,7 +84,7 @@ int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx)
     printf("output tensors:\n");
     rknn_tensor_attr output_attrs[io_num.n_output];
     memset(output_attrs, 0, sizeof(output_attrs));
-    for (int i = 0; i < io_num.n_output; i++)
+    for (uint32_t i = 0; i < io_num.n_output; i++)
     {
         output_attrs[i].index = i;
         ret = rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
@@ -222,7 +222,7 @@ int inference_yolo11_model(rknn_app_context_t *app_ctx, image_buffer_t *img, obj
 
     // Get Output
     memset(outputs, 0, sizeof(outputs));
-    for (int i = 0; i < app_ctx->io_num.n_output; i++)
+    for (uint32_t i = 0; i < app_ctx->io_num.n_output; i++)
     {
         outputs[i].index = i;
         outputs[i].want_float = (!app_ctx->is_quant);

@@ -2,6 +2,7 @@
 *.o
 main
 camera
+camera_webserver
 yolo11-test
 out.png
 
