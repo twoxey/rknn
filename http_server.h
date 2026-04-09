@@ -14,6 +14,7 @@ void connection_close(Connection* connection);
 bool connection_read(Connection* connection, char* buf, size_t* len);
 bool connection_write(Connection* connection, const char* buf, size_t len);
 
+typedef struct Server Server;
 typedef struct {
     void (*on_new_connection)(Connection* connection, uint32_t addr, uint16_t port, void* data);
     void (*on_get_request)(Connection* connection, string url, void* data);
@@ -21,7 +22,13 @@ typedef struct {
     void* data;
 } Http_Handlers;
 
-bool http_server_run(uint32_t addr, uint16_t port, Http_Handlers* handlers);
+size_t http_server_memory_size();
+bool http_server_run(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers);
+
+bool http_server_init(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers);
+void http_server_deinit(Server* server);
+bool http_server_run_loop(Server* server);
+
 bool http_write_headers(Connection* connection, int status, string headers);
 bool http_write_response(Connection* connection, int status, const char* content_type, string body);
 bool http_write_response_text(Connection* connection, int status, const char* body);
@@ -237,141 +244,185 @@ bool http_parse_get_request(Connection* connection, const char* buf, size_t len,
     return true;
 }
 
-bool http_server_run(uint32_t addr, uint16_t port, Http_Handlers* handlers) {
-    bool result = true;
+struct Server {
+    int _epoll_fd;  // ~fd, this makes ~0 an invalid fd so zero initializaion will work
+    int _listen_fd; // ~fd, this makes ~0 an invalid fd so zero initializaion will work
+    Connection connections[20];
+    Http_Handlers handlers;
+};
+
+void http_server_deinit(Server* server) {
+    ARRAY_FOREACH(Connection*, server->connections, c){
+        if (c->_fd) {
+            close(~c->_fd);
+            c->_fd = 0;
+        }
+    }
+    if (server->_listen_fd) {
+        close(~server->_listen_fd);
+        server->_listen_fd = 0;
+    }
+    if (server->_epoll_fd) {
+        close(~server->_epoll_fd);
+        server->_epoll_fd = 0;
+    }
+}
+
+bool http_server_init(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers) {
+    *server = (Server){};
 
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) {
         log_error("epoll_create1() failed: %s\n", strerror(errno));
-        result = false;
-        goto end;
+        goto error;
     }
 
-    int listen_socket = tcp_socket_listen(addr, port);
-    if (listen_socket < 0) {
+    int listen_fd = tcp_socket_listen(addr, port);
+    if (listen_fd < 0) {
         log_error("Failed to create and listen tcp socket\n");
-        result = false;
-        goto end;
+        goto error;
     }
 
-    if (!epoll_add(epoll_fd, listen_socket, (epoll_data_t){.ptr = &listen_socket})) {
+    if (!epoll_add(epoll_fd, listen_fd, (epoll_data_t){.ptr = &server->_listen_fd})) {
         log_error("Failed to add listen socket to epoll\n");
-        result = false;
-        goto end;
+        goto error;
     }
-
-    Connection connections[20] = {};
 
     pthread_mutexattr_t mutex_attr;
     int err = pthread_mutexattr_init(&mutex_attr);
     if (err != 0) {
         log_error("pthread_mutexattr_init() failed: %s\n", strerror(err));
-        result = false;
-        goto end;
+        goto error;
     }
     err = pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
     if (err != 0) {
         log_error("pthread_mutexattr_settype() failed: %s\n", strerror(err));
-        result = false;
-        goto end;
+        goto error;
     }
-    ARRAY_FOREACH(Connection*, connections, connection) {
+    ARRAY_FOREACH(Connection*, server->connections, connection) {
         err = pthread_mutex_init(&connection->mutex, &mutex_attr);
         if (err != 0) {
             log_error("pthread_mutex_init() failed: %s\n", strerror(err));
-            result = false;
-            goto end;
+            goto error;
         }
     }
+    err = pthread_mutexattr_destroy(&mutex_attr);
+    if (err != 0) {
+        log_error("pthread_mutexattr_destroy() failed: %s\n", strerror(err));
+        goto error;
+    }
+
+    server->_epoll_fd = ~epoll_fd;
+    server->_listen_fd = ~listen_fd;
+    server->handlers = *handlers;
 
     log_print("[INFO] Server listening on http://"ADDR_PRI":%d\n", ADDR_ARG(addr), port);
 
-    while (true) {
-        struct epoll_event events[10];
-        int event_count = epoll_wait(epoll_fd, events, ARRAY_LEN(events), -1);
-        if (event_count < 0) {
-            log_error("epoll_wait() failed: %s\n", strerror(errno));
-            result = false;
-            goto end;
-        }
-        for (int i = 0; i < event_count; ++i) {
-            epoll_data_t data = events[i].data;
-            if (data.ptr == &listen_socket) {
-                struct sockaddr_in client_addr;
-                socklen_t addrlen = sizeof(client_addr);
-                int client_fd = accept(listen_socket, (struct sockaddr*)&client_addr, &addrlen);
-                if (client_fd < 0) {
-                    log_error("accept() failed: %s\n", strerror(errno));
-                    continue;
-                }
-                Connection* result = NULL;
-                ARRAY_FOREACH(Connection*, connections, c){
-                    if (~c->_fd == client_fd) {
-                        log_error("[Unreachable!!] accept() got a fd that is already existed in recorded connections\n");
-                        result = false;
-                        goto end;
-                    }
-                    if (!result && c->_fd == 0) {
-                        c->_fd = ~client_fd;
-                        result = c;
-                    }
-                }
-                if (!result) {
-                    log_error("Maximum connection count excceeded\n");
-                    close(client_fd);
-                    continue;
-                }
-                if (!epoll_add(epoll_fd, client_fd, (epoll_data_t){.ptr = result})) {
-                    log_error("Failed to add new connection to epoll\n");
-                    close(client_fd);
-                    continue;
-                }
-                uint32_t addr = client_addr.sin_addr.s_addr;
-                uint16_t port = ntohs(client_addr.sin_port);
-                log_print("[INFO] Got new connection %p from: "ADDR_PRI":%d\n", result, ADDR_ARG(addr), port);
-                if (handlers->on_new_connection) {
-                    handlers->on_new_connection(result, addr, port, handlers->data);
-                }
-            } else {
-                Connection* connection = data.ptr;
-                if (!connection_is_open(connection)) {
-                    log_error("[Unreachable!!] epoll_wait() returned a data pointer that is not an opening connection\n");
-                    result = false;
-                    goto end;
-                }
+    return true;
 
-                char buf[8192];
-                size_t len = sizeof(buf);
-                if (!connection_read(connection, buf, &len)) {
-                    log_error("Failed to read from connection\n");
-                    continue;
-                }
+error:
+    http_server_deinit(server);
+    return false;
+}
 
-                if (len == 0) {
-                    if (handlers->on_close) {
-                        handlers->on_close(connection, handlers->data);
-                    }
-                    connection_close(connection);
-                    log_print("[INFO] Connection %p closed by remote client\n", connection);
-                    continue;
-                }
+bool http_server_run_loop(Server* server) {
+    int epoll_fd  = ~server->_epoll_fd;
+    int listen_fd = ~server->_listen_fd;
+    Http_Handlers* handlers = &server->handlers;
 
-                string url;
-                if (!http_parse_get_request(connection, buf, len, &url)) {
-                    continue;
+    struct epoll_event events[10];
+    int event_count = epoll_wait(epoll_fd, events, ARRAY_LEN(events), -1);
+    if (event_count < 0) {
+        log_error("epoll_wait() failed: %s\n", strerror(errno));
+        return false;
+    }
+    for (int i = 0; i < event_count; ++i) {
+        epoll_data_t data = events[i].data;
+        if (data.ptr == &server->_listen_fd) {
+            struct sockaddr_in client_addr;
+            socklen_t addrlen = sizeof(client_addr);
+            int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &addrlen);
+            if (client_fd < 0) {
+                log_error("accept() failed: %s\n", strerror(errno));
+                continue;
+            }
+            Connection* result = NULL;
+            ARRAY_FOREACH(Connection*, server->connections, c){
+                if (~c->_fd == client_fd) {
+                    log_error("[Unreachable!!] accept() got a fd that is already existed in recorded connections\n");
+                    return false;
                 }
+                if (!result && c->_fd == 0) {
+                    c->_fd = ~client_fd;
+                    result = c;
+                }
+            }
+            if (!result) {
+                log_error("Maximum connection count excceeded\n");
+                close(client_fd);
+                continue;
+            }
+            if (!epoll_add(epoll_fd, client_fd, (epoll_data_t){.ptr = result})) {
+                log_error("Failed to add new connection to epoll\n");
+                close(client_fd);
+                continue;
+            }
+            uint32_t addr = client_addr.sin_addr.s_addr;
+            uint16_t port = ntohs(client_addr.sin_port);
+            log_print("[INFO] Got new connection %p from: "ADDR_PRI":%d\n", result, ADDR_ARG(addr), port);
+            if (handlers->on_new_connection) {
+                handlers->on_new_connection(result, addr, port, handlers->data);
+            }
+        } else {
+            Connection* connection = data.ptr;
+            if (!connection_is_open(connection)) {
+                log_error("[Unreachable!!] epoll_wait() returned a data pointer that is not an opening connection\n");
+                return false;
+            }
 
-                if (handlers->on_get_request) {
-                    handlers->on_get_request(connection, url, handlers->data);
+            char buf[8192];
+            size_t len = sizeof(buf);
+            if (!connection_read(connection, buf, &len)) {
+                log_error("Failed to read from connection\n");
+                continue;
+            }
+
+            if (len == 0) {
+                if (handlers->on_close) {
+                    handlers->on_close(connection, handlers->data);
                 }
+                connection_close(connection);
+                log_print("[INFO] Connection %p closed by remote client\n", connection);
+                continue;
+            }
+
+            string url;
+            if (!http_parse_get_request(connection, buf, len, &url)) {
+                continue;
+            }
+
+            log_print("[INFO] Connection %p: GET %.*s\n", connection, (int)url.len, url.data);
+
+            if (handlers->on_get_request) {
+                handlers->on_get_request(connection, url, handlers->data);
             }
         }
     }
 
-end:
-    if (listen_socket >= 0) close(listen_socket);
-    if (epoll_fd >= 0) close(epoll_fd);
+    return true;
+}
 
-    return result;
+size_t http_server_memory_size() {
+    return sizeof(Server);
+}
+
+bool http_server_run(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers) {
+    if (!http_server_init(server, addr, port, handlers)) {
+        log_error("Failed to start http server\n");
+        return false;
+    }
+    while (http_server_run_loop(server)) {}
+    http_server_deinit(server);
+    return true;
 }
 

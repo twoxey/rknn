@@ -7,6 +7,9 @@ cd $(dirname $0)
 COMMON_FLAGS="-Wall -Wextra"
 INCLUDES_PATHS="-I rknpu2/include -I utils -I stb_image"
 
+if 0
+then
+
 g++ $COMMON_FLAGS -Wno-unused $INCLUDES_PATHS -c yolo11.cc
 g++ $COMMON_FLAGS -Wno-unused $INCLUDES_PATHS -c postprocess.cc
 gcc $COMMON_FLAGS -Wno-unused $INCLUDES_PATHS -c utils/file_utils.c
@@ -38,8 +41,10 @@ g++ -o camera \
     librga/Linux/aarch64/librga.a \
     rknpu2/Linux/aarch64/librknnrt.so
 
+fi
+
 echo "Building camera server..."
 
-gcc $COMMON_FLAGS -o camera_webserver camera_webserver.c
+gcc $COMMON_FLAGS -Wno-unused -o camera_webserver camera_webserver.c
 
 

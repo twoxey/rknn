@@ -46,6 +46,9 @@ struct Arena {
 #define TEMP_ARENA(size) (Arena){.base = (char[size]){}, .capacity = size}
 #define arena_push(a, T) (T*)arena_push_size(a, sizeof(T))
 void* arena_push_size(Arena* arena, size_t size);
+
+string arena_printf(Arena* arena, const char* fmt, ...) __attribute__((format (printf, 2, 3)));
+
 void* arena_alloc_fn(void* data, void* ptr, size_t size);
 static inline Allocator arena_get_allocator(Arena* arena) {
     return (Allocator){arena_alloc_fn, arena};
@@ -62,6 +65,7 @@ bool thread_join(Thread* thread, void** ret);
 //
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
@@ -136,6 +140,19 @@ void* arena_alloc_fn(void* data, void* ptr, size_t size) {
     }
     // ignore realloc and free
     return NULL;
+}
+
+string arena_printf(Arena* arena, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    string result = {};
+    result.data = arena->base + arena->used;
+    result.len = vsnprintf(arena->base + arena->used, arena->capacity - arena->used, fmt, args);
+    arena->used += result.len;
+
+    va_end(args);
+    return result;
 }
 
 string read_entire_file(const char* file_path, Allocator allocator) {
