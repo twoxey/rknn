@@ -172,14 +172,14 @@ void* server_thread_porc(void* data) {
 
     Arena arena = TEMP_ARENA(4096);
 
-    Server* server = arena_push(&arena, Server);
     Http_Handlers handlers = {
         .on_new_connection = on_new_connection,
         .on_get_request = on_get_request,
         .on_close = on_close,
         .data = state,
     };
-    if (http_server_init(server, INADDR_ANY, 8080, &handlers)) {
+    Server* server = http_server_init(INADDR_ANY, 8080, &handlers);
+    if (server) {
         state->server_started = true;
 
         while (http_server_run_loop(server)) {};
@@ -196,8 +196,8 @@ void* server_thread_porc(void* data) {
 void* camera_thread_porc(void* data) {
     App_State* state = data;
 
-    struct camera cam;
-    if (!camera_init(&cam, "/dev/video0")) {
+    struct camera* cam = camera_init("/dev/video0");
+    if (!cam) {
         log_error("Failed to start camera\n");
         goto end;
     }
@@ -208,18 +208,18 @@ void* camera_thread_porc(void* data) {
 
     while (!state->should_close) {
         struct mapped_buffer buffer;
-        int index = camera_dequeue_buffer(&cam, &buffer);
+        int index = camera_dequeue_buffer(cam, &buffer);
 
         if (index < 0) goto end;
 
         state_mjpg_stream_write_data(state, (string){buffer.start, buffer.length});
 
-        if (!camera_queue_buffer(&cam, index)) goto end;
+        if (!camera_queue_buffer(cam, index)) goto end;
     }
 end:
     log_print("[INFO] camera stream ended\n");
     state->camera_started = false;
-    camera_deinit(&cam);
+    camera_deinit(cam);
     return NULL;
 }
 

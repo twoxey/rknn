@@ -37,6 +37,8 @@ static inline void allocator_free(Allocator allocator, void* ptr){
     allocator.alloc_fn(allocator.data, ptr, 0);
 }
 
+Allocator default_allocator;
+
 typedef struct Arena Arena;
 struct Arena {
     char* base;
@@ -65,6 +67,7 @@ bool thread_join(Thread* thread, void** ret);
 //
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 #include <assert.h>
@@ -74,6 +77,12 @@ bool thread_join(Thread* thread, void** ret);
 
 #define log_print(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
 #define log_error(fmt, ...) fprintf(stderr, "ERROR: " fmt, ## __VA_ARGS__)
+
+void* libc_alloc_fn(void* data, void* ptr, size_t size) {
+    (void)data;
+    return realloc(ptr, size);
+}
+Allocator default_allocator = {libc_alloc_fn, NULL};
 
 string string_from_cstr(const char* cstr) {
     return (string){(char*)cstr, strlen(cstr)};

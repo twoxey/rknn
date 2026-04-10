@@ -22,10 +22,9 @@ typedef struct {
     void* data;
 } Http_Handlers;
 
-size_t http_server_memory_size();
-bool http_server_run(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers);
+bool http_server_run(uint32_t addr, uint16_t port, Http_Handlers* handlers);
 
-bool http_server_init(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers);
+Server* http_server_init(uint32_t addr, uint16_t port, Http_Handlers* handlers);
 void http_server_deinit(Server* server);
 bool http_server_run_loop(Server* server);
 
@@ -249,9 +248,12 @@ struct Server {
     int _listen_fd; // ~fd, this makes ~0 an invalid fd so zero initializaion will work
     Connection connections[20];
     Http_Handlers handlers;
+    Allocator allocator;
 };
 
 void http_server_deinit(Server* server) {
+    if (!server) return;
+
     ARRAY_FOREACH(Connection*, server->connections, c){
         if (c->_fd) {
             close(~c->_fd);
@@ -266,10 +268,19 @@ void http_server_deinit(Server* server) {
         close(~server->_epoll_fd);
         server->_epoll_fd = 0;
     }
+
+    allocator_free(server->allocator, server);
 }
 
-bool http_server_init(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers) {
-    *server = (Server){};
+Server* http_server_init(uint32_t addr, uint16_t port, Http_Handlers* handlers) {
+    Allocator allocator = default_allocator;
+    Server* server = allocator_alloc(allocator, sizeof(Server));
+    if (!server) {
+        log_error("memory allocation failed\n");
+        goto error;
+    }
+    memset(server, 0, sizeof(Server));
+    server->allocator = allocator;
 
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) {
@@ -318,11 +329,11 @@ bool http_server_init(Server* server, uint32_t addr, uint16_t port, Http_Handler
 
     log_print("[INFO] Server listening on http://"ADDR_PRI":%d\n", ADDR_ARG(addr), port);
 
-    return true;
+    return server;
 
 error:
     http_server_deinit(server);
-    return false;
+    return NULL;
 }
 
 bool http_server_run_loop(Server* server) {
@@ -412,12 +423,9 @@ bool http_server_run_loop(Server* server) {
     return true;
 }
 
-size_t http_server_memory_size() {
-    return sizeof(Server);
-}
-
-bool http_server_run(Server* server, uint32_t addr, uint16_t port, Http_Handlers* handlers) {
-    if (!http_server_init(server, addr, port, handlers)) {
+bool http_server_run(uint32_t addr, uint16_t port, Http_Handlers* handlers) {
+    Server* server = http_server_init(addr, port, handlers);
+    if (!server) {
         log_error("Failed to start http server\n");
         return false;
     }

@@ -28,6 +28,8 @@ g++ $COMMON_FLAGS $INCLUDES_PATHS -o yolo11-test \
     librga/Linux/aarch64/librga.a \
     rknpu2/Linux/aarch64/librknnrt.so
 
+fi
+
 echo "Building camera..."
 
 gcc $COMMON_FLAGS $INCLUDES_PATHS -c camera.c
@@ -40,8 +42,6 @@ g++ -o camera \
     postprocess.o \
     librga/Linux/aarch64/librga.a \
     rknpu2/Linux/aarch64/librknnrt.so
-
-fi
 
 echo "Building camera server..."
 

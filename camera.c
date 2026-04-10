@@ -36,18 +36,18 @@ int main(void) {
         goto end;
     }
 
-    struct camera cam;
-    if (!camera_init(&cam, "/dev/video0")) goto end;
+    struct camera* cam = camera_init("/dev/video0");
+    if (cam) goto end;
 
     while (true) {
         struct mapped_buffer buffer;
-        int index = camera_dequeue_buffer(&cam, &buffer);
+        int index = camera_dequeue_buffer(cam, &buffer);
         if (index < 0) break;
 
         image_buffer_t image;
         if (!load_jpeg_image_from_memory((unsigned char*)buffer.start, buffer.length, &image)) break;
 
-        if (!camera_queue_buffer(&cam, index)) break;
+        if (!camera_queue_buffer(cam, index)) break;
 
         object_detect_result_list od_results;
         int ret = inference_yolo11_model(&rknn_app_ctx, &image, &od_results);
@@ -72,7 +72,7 @@ int main(void) {
     }
 
 end:
-    camera_deinit(&cam);
+    camera_deinit(cam);
 
     ret = release_yolo11_model(&rknn_app_ctx);
     if (ret != 0) {
