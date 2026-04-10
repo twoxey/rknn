@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Page</title>
+</head>
+<body>
+    <button id="event-button"></button>
+    <div id="message-container"></div>
+    <script>
+        "use strict";
+        const button = document.getElementById("event-button");
+        const message_container = document.getElementById("message-container");
+        let event_source = undefined;
+        main();
+        function main() {
+            button_init();
+        }
+        function button_init() {
+            button.style.cursor = 'pointer'
+            button.innerText = "Connect Event Source";
+            button.onclick = () => {
+                event_source_connect();
+                button.innerText = "Close Event Source";
+                button.onclick = () => {
+                    event_source_close();
+                    button_init();
+                };
+            };
+        }
+        function event_source_connect() {
+            if (!event_source) {
+                event_source = new EventSource("/events");
+                event_source.onmessage = event => {
+                    append_message(event.data);
+                };
+                event_source.onopen = event => {
+                    append_message("[INFO] event source opened: " + JSON.stringify(event));
+                }
+                event_source.onerror = err => {
+                    const pre = append_message("[Error] event source failed to connect: " + JSON.stringify(err));
+                    pre.style.color = 'red';
+                    event_source_close();
+                    button_init();
+                };
+            }
+        }
+        function event_source_close() {
+            if (event_source) {
+                event_source.close();
+                event_source = undefined;
+            }
+        }
+        function append_message(message) {
+            const pre = document.createElement('pre');
+            message_container.append(pre);
+            pre.innerText = message;
+            return pre;
+        }
+    </script>
+</body>
+</html>
+
