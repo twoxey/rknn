@@ -48,6 +48,7 @@ struct Arena {
 #define TEMP_ARENA(size) (Arena){.base = (char[size]){}, .capacity = size}
 #define arena_push(a, T) (T*)arena_push_size(a, sizeof(T))
 void* arena_push_size(Arena* arena, size_t size);
+void arena_push_char(Arena* arena, char ch);
 
 string arena_printf(Arena* arena, const char* fmt, ...) __attribute__((format (printf, 2, 3)));
 
@@ -140,6 +141,11 @@ void* arena_push_size(Arena* arena, size_t size) {
     void* result = arena->base + arena->used;
     arena->used += size;
     return result;
+}
+
+void arena_push_char(Arena* arena, char ch) {
+    if (arena->used >= arena->capacity) return;
+    arena->base[arena->used++] = ch;
 }
 
 void* arena_alloc_fn(void* data, void* ptr, size_t size) {

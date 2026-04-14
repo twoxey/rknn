@@ -1,6 +1,9 @@
 #include "http_server.h"
 #include "camera.h"
 
+#include "yolo11.h"
+#include "stb_image.h"
+
 #define BOUNDARY_STRING "ExampleBoundaryString"
 
 typedef struct {
@@ -10,6 +13,8 @@ typedef struct {
 
     Connection* sse_clients[10];
     Connection* mjpg_streaming_clients[10];
+
+    rknn_app_context_t* rknn_app_ctx;
 } App_State;
 
 bool connections_add(Connection* connections[], size_t connection_count, Connection* connection) {
@@ -77,17 +82,18 @@ void state_remove_client(App_State* state, Connection* connection) {
     }
 }
 
-int state_sse_write_message(App_State* state, string data) {
-    Arena arena = TEMP_ARENA(8192);
-
-    string buf = { arena.base + arena.used, 0 };
+int state_sse_write_message(App_State* state, const char* event, string data) {
+    Arena builder = TEMP_ARENA(8192);
+    if (event) {
+        arena_printf(&builder, "event: %s\n", event);
+    }
     while (data.len > 0) {
         string line = string_split_by_line(&data);
-        buf.len += arena_printf(&arena, "data: %.*s\r\n", (int)line.len, line.data).len;
+        arena_printf(&builder, "data: %.*s\n", (int)line.len, line.data);
     }
-    buf.len += arena_printf(&arena, "\r\n").len;
+    arena_push_char(&builder, '\n');
 
-    int result = connections_write_data(state->sse_clients, ARRAY_LEN(state->sse_clients), buf.data, buf.len);
+    int result = connections_write_data(state->sse_clients, ARRAY_LEN(state->sse_clients), builder.base, builder.used);
 
     return result;
 }
@@ -110,6 +116,10 @@ int state_mjpg_stream_write_data(App_State* state, string jpeg_data) {
 }
 
 void on_new_connection(Connection* connection, uint32_t addr, uint16_t port, void* data) {
+    (void)connection;
+    (void)addr;
+    (void)port;
+    (void)data;
 }
 
 void on_get_request(Connection* connection, string url, void* data) {
@@ -151,7 +161,7 @@ void on_get_request(Connection* connection, string url, void* data) {
         return;
 
     } else if (string_eq(url, string_from_cstr("/broadcast"))) {
-        int write_count = state_sse_write_message(state, string_from_cstr(
+        int write_count = state_sse_write_message(state, NULL, string_from_cstr(
             "This is a sse broadcast message\n"
             "Here's the second line.\n"
         ));
@@ -169,8 +179,6 @@ void on_close(Connection* connection, void* data) {
 
 void* server_thread_porc(void* data) {
     App_State* state = data;
-
-    Arena arena = TEMP_ARENA(4096);
 
     Http_Handlers handlers = {
         .on_new_connection = on_new_connection,
@@ -193,6 +201,42 @@ void* server_thread_porc(void* data) {
     return NULL;
 }
 
+struct timespec get_time() {
+    struct timespec time = {};
+    if (clock_gettime(CLOCK_MONOTONIC, &time) < 0) {
+        log_error("clock_gettime() failed: %s\n", strerror(errno));
+    }
+    return time;
+}
+
+float time_diff(struct timespec a, struct timespec b) {
+    return (a.tv_sec - b.tv_sec) + (float)(a.tv_nsec - b.tv_nsec) / 1e9f;
+}
+
+bool load_jpeg_image_from_memory(const unsigned char* buf, size_t len, image_buffer_t* image) {
+    *image = (image_buffer_t){};
+
+    int w, h, c;
+    stbi_uc *pixeldata = stbi_load_from_memory(buf, len, &w, &h, &c, 0);
+    if (!pixeldata) {
+        log_error("error: failed to load jpeg image from memory\n");
+        return false;
+    }
+
+    //int size = w * h * c;
+    image->virt_addr = pixeldata;
+    image->width = w;
+    image->height = h;
+    if (c == 4) {
+        image->format = IMAGE_FORMAT_RGBA8888;
+    } else if (c == 1) {
+        image->format = IMAGE_FORMAT_GRAY8;
+    } else {
+        image->format = IMAGE_FORMAT_RGB888;
+    }
+    return true;
+}
+
 void* camera_thread_porc(void* data) {
     App_State* state = data;
 
@@ -206,15 +250,83 @@ void* camera_thread_porc(void* data) {
 
     state->camera_started = true;
 
+    size_t frame_count = 0;
+    size_t sent_count = 0;
+
+    float frame_times[5] = {};
+    int frame_time_idx = 0;
+
+    struct timespec last_time = get_time();
+
     while (!state->should_close) {
         struct mapped_buffer buffer;
         int index = camera_dequeue_buffer(cam, &buffer);
 
+        struct timespec current_time = get_time();
+
         if (index < 0) goto end;
 
-        state_mjpg_stream_write_data(state, (string){buffer.start, buffer.length});
+        image_buffer_t image = {};
+        bool image_loaded = load_jpeg_image_from_memory(buffer.start, buffer.length, &image);
+        int clients_written = state_mjpg_stream_write_data(state, (string){buffer.start, buffer.length});
 
         if (!camera_queue_buffer(cam, index)) goto end;
+
+        object_detect_result_list od_results = {};
+        if (image_loaded) {
+            int ret = inference_yolo11_model(state->rknn_app_ctx, &image, &od_results);
+            if (ret != 0) {
+                log_error("init_yolo11_model fail! ret=%d\n", ret);
+            }
+            free(image.virt_addr);
+        }
+
+        ++frame_count;
+        sent_count += clients_written;
+
+        frame_times[frame_time_idx++] = time_diff(current_time, last_time);
+        frame_time_idx %= ARRAY_LEN(frame_times);
+
+        float fps = 0;
+        for (size_t i = 0; i < ARRAY_LEN(frame_times); ++i) {
+            fps += frame_times[i];
+        }
+        fps /= ARRAY_LEN(frame_times);
+        fps = 1.0f / fps;
+
+        Arena builder = TEMP_ARENA(8192);
+        arena_push_char(&builder, '{');
+        arena_printf(&builder,
+            "\"frame_count\": %zu,"
+            "\"sent_count\": %zu,"
+            "\"fps\": %f,",
+            frame_count,
+            sent_count,
+            fps);
+        arena_printf(&builder, "\"results\": [");
+        for (int i = 0; i < od_results.count; i++) {
+            object_detect_result *det_result = &od_results.results[i];
+            if (i > 0) arena_push_char(&builder, ',');
+            arena_printf(&builder,
+                "{\"class\": \"%d\","
+                "\"minx\": %d,"
+                "\"miny\": %d,"
+                "\"maxx\": %d,"
+                "\"maxy\": %d,"
+                "\"confidence\": %.3f}",
+                det_result->cls_id,
+                det_result->box.left,
+                det_result->box.top,
+                det_result->box.right,
+                det_result->box.bottom,
+                det_result->prop);
+        }
+        arena_push_char(&builder, ']');
+        arena_push_char(&builder, '}');
+
+        state_sse_write_message(state, "stream_info", (string){builder.base, builder.used});
+
+        last_time = current_time;
     }
 end:
     log_print("[INFO] camera stream ended\n");
@@ -226,20 +338,11 @@ end:
 void* message_thread_proc(void* data) {
     App_State* state = data;
 
-    struct timespec start_time = {};
-    if (clock_gettime(CLOCK_MONOTONIC, &start_time) < 0) {
-        log_error("clock_gettime() failed: %s\n", strerror(errno));
-    }
+    struct timespec start_time = get_time();
     int message_id = 0;
     while (!state->should_close) {
-        float secs = 0;
-        struct timespec current_time = {};
-        if (clock_gettime(CLOCK_MONOTONIC, &current_time) < 0) {
-            log_error("clock_gettime() failed: %s\n", strerror(errno));
-        } else {
-            secs = (current_time.tv_sec - start_time.tv_sec) + (float)(current_time.tv_nsec - start_time.tv_nsec) / 1e9f;
-        }
-        state_sse_write_message(state, arena_printf(&TEMP_ARENA(1024), "Message id: %d, time elapsed: %f\n", message_id, secs));
+        float secs = time_diff(get_time(), start_time);
+        state_sse_write_message(state, NULL, arena_printf(&TEMP_ARENA(1024), "Message id: %d, time elapsed: %f\n", message_id, secs));
         ++message_id;
         sleep(2);
     }
@@ -249,6 +352,16 @@ void* message_thread_proc(void* data) {
 
 int main(void) {
     App_State state = {};
+
+    const char* model_path = "yolo11.rknn";
+
+    rknn_app_context_t rknn_app_ctx = {};
+    int ret = init_yolo11_model(model_path, &rknn_app_ctx);
+    if (ret != 0) {
+        log_error("init_yolo11_model fail! ret=%d model_path=%s\n", ret, model_path);
+        return 1;
+    }
+    state.rknn_app_ctx = &rknn_app_ctx;
 
     Thread* server_thread = thread_start(server_thread_porc, &state);
     if (!server_thread) {
@@ -260,15 +373,22 @@ int main(void) {
         log_error("Failed to start camera thread\n");
         return 1;
     }
+    /*
     Thread* message_thread = thread_start(message_thread_proc, &state);
     if (!server_thread) {
         log_error("Failed to start message thread\n");
         return 1;
     }
+    */
 
     thread_join(camera_thread, NULL);
     thread_join(server_thread, NULL);
-    thread_join(message_thread, NULL);
+    //thread_join(message_thread, NULL);
+
+    ret = release_yolo11_model(&rknn_app_ctx);
+    if (ret != 0) {
+        log_error("release_yolo11_model fail! ret=%d\n", ret);
+    }
 
     return 0;
 }

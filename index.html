@@ -4,21 +4,36 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Test Page</title>
+    <style>
+        #message-container {
+            max-height: 30em;
+            overflow-y: auto;
+        }
+        #image-container {
+            position: relative;
+        }
+        #image-container canvas {
+            position: absolute;
+            top:0;
+            left:0;
+        }
+    </style>
 </head>
 <body>
+    <div id="image-container"></div>
     <button id="event-button"></button>
+    <div id="stream-info"></div>
     <div id="message-container"></div>
     <script>
         "use strict";
         const button = document.getElementById("event-button");
         const message_container = document.getElementById("message-container");
+        const stream_info = document.getElementById("stream-info");
+        const image = init_image();
         let event_source = undefined;
-        main();
-        function main() {
-            button_init();
-        }
+        button_init();
         function button_init() {
-            button.style.cursor = 'pointer'
+            button.style.cursor = "pointer"
             button.innerText = "Connect Event Source";
             button.onclick = () => {
                 event_source_connect();
@@ -35,6 +50,11 @@
                 event_source.onmessage = event => {
                     append_message(event.data);
                 };
+                event_source.addEventListener("stream_info", event => {
+                    const data = JSON.parse(event.data);
+                    stream_info.innerText = event.data;
+                    image.draw_results(data.results);
+                });
                 event_source.onopen = event => {
                     append_message("[INFO] event source opened: " + JSON.stringify(event));
                 }
@@ -53,10 +73,45 @@
             }
         }
         function append_message(message) {
-            const pre = document.createElement('pre');
+            const pre = document.createElement("pre");
             message_container.append(pre);
             pre.innerText = message;
+            message_container.scrollTop = message_container.scrollHeight;
             return pre;
+        }
+        const inference_results = [
+            { class: "bus"    , minx: 95  , miny: 136 , maxx: 553 , maxy: 437, confidence: 0.944 },
+            { class: "person" , minx: 108 , miny: 236 , maxx: 223 , maxy: 535, confidence: 0.890 },
+            { class: "person" , minx: 211 , miny: 239 , maxx: 284 , maxy: 508, confidence: 0.843 },
+            { class: "person" , minx: 477 , miny: 229 , maxx: 559 , maxy: 522, confidence: 0.827 },
+            { class: "person" , minx: 79  , miny: 358 , maxx: 118 , maxy: 516, confidence: 0.490 },
+        ];
+        function init_image() {
+            const image_container = document.getElementById("image-container");
+            const image = new Image();
+            const canvas = document.createElement("canvas");
+            const context = canvas.getContext('2d');
+            image.src = "/camera";
+            image_container.append(image, canvas);
+            return {
+                draw_results(results) {
+                    canvas.width = image.width;
+                    canvas.height = image.height;
+                    context.clearRect(0, 0, canvas.width, canvas.height);
+                    context.lineWidth = 3
+                    context.strokeStyle = "blue"
+                    context.font = "16px monospace"
+                    context.fillStyle = "red"
+                    for (const result of results) {
+                        const x = result.minx;
+                        const y = result.miny;
+                        const w = result.maxx - result.minx;
+                        const h = result.maxy - result.miny;
+                        context.strokeRect(x, y, w, h);
+                        context.fillText(`${result.class} ${(result.confidence*100).toFixed(1)}%`, x, y);
+                    }
+                }
+            }
         }
     </script>
 </body>
