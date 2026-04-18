@@ -19,6 +19,7 @@ typedef struct {
     void (*on_new_connection)(Connection* connection, uint32_t addr, uint16_t port, void* data);
     void (*on_get_request)(Connection* connection, string url, void* data);
     void (*on_close)(Connection* connection, void* data);
+    bool (*on_data)(Connection* connection, char* buf, size_t len, void* data);
     void* data;
 } Http_Handlers;
 
@@ -405,6 +406,13 @@ bool http_server_run_loop(Server* server) {
                 connection_close(connection);
                 log_print("[INFO] Connection %p closed by remote client\n", connection);
                 continue;
+            }
+
+            if (handlers->on_data) {
+                if (handlers->on_data(connection, buf, len, handlers->data)) {
+                    // we handled this connection, do not run http routines
+                    continue;
+                }
             }
 
             string url;

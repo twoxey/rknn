@@ -15,6 +15,7 @@ typedef struct {
 
     Connection* sse_clients[10];
     Connection* mjpg_streaming_clients[10];
+    Connection* esp_connection;
 
     rknn_app_context_t* rknn_app_ctx;
 } App_State;
@@ -117,6 +118,21 @@ int state_mjpg_stream_write_data(App_State* state, string jpeg_data) {
     return data_count;
 }
 
+bool on_data(Connection* connection, char* buf, size_t len, void* data) {
+    App_State* state = data;
+    string message = {buf, len};
+    if (string_starts_with(message, string_from_cstr("XRP "))) {
+        log_print("[INFO] got connection from esp32: %.*s\n", (int)message.len, message.data);
+        if (state->esp_connection) {
+            log_error("Got new esp32 connection when one is already present\n");
+            return false;
+        }
+        state->esp_connection = connection;
+        return true;
+    }
+    return false;
+}
+
 void on_new_connection(Connection* connection, uint32_t addr, uint16_t port, void* data) {
     (void)connection;
     (void)addr;
@@ -163,11 +179,17 @@ void on_get_request(Connection* connection, string url, void* data) {
         return;
 
     } else if (string_eq(url, string_from_cstr("/broadcast"))) {
-        int write_count = state_sse_write_message(state, NULL, string_from_cstr(
-            "This is a sse broadcast message\n"
-            "Here's the second line.\n"
-        ));
-        http_write_response_text(connection, 200, arena_printf(&TEMP_ARENA(1024), "Broadcasted message to %d sse clients", write_count).data);
+        Arena builder = TEMP_ARENA(1024);
+        bool ok = false;
+        if (state->esp_connection) {
+            string message = string_from_cstr("broadcast esp32");
+            ok = connection_write(state->esp_connection, message.data, message.len);
+        }
+        arena_printf(&builder, "Esp connected: %d\n", (bool)state->esp_connection);
+        arena_printf(&builder, "Esp write succeeded: %d\n", ok);
+        int write_count = state_sse_write_message(state, NULL, (string){builder.base, builder.used});
+        arena_printf(&builder, "Broadcasted message to %d sse clients\n", write_count);
+        http_write_response_text(connection, 200, builder.base);
         return;
     }
 
@@ -176,7 +198,13 @@ void on_get_request(Connection* connection, string url, void* data) {
 
 void on_close(Connection* connection, void* data) {
     App_State* state = data;
-    state_remove_client(state, connection);
+    if (connection == state->esp_connection) {
+        state->esp_connection = NULL;
+        log_print("[INFO] esp32 disconnected\n");
+        state_sse_write_message(state, NULL, string_from_cstr("esp disconnected"));
+    } else {
+        state_remove_client(state, connection);
+    }
 }
 
 void* server_thread_porc(void* data) {
@@ -186,6 +214,7 @@ void* server_thread_porc(void* data) {
         .on_new_connection = on_new_connection,
         .on_get_request = on_get_request,
         .on_close = on_close,
+        .on_data = on_data,
         .data = state,
     };
     Server* server = http_server_init(INADDR_ANY, 8080, &handlers);
