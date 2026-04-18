@@ -4,6 +4,8 @@
 #include "yolo11.h"
 #include "stb_image.h"
 
+#include "coco_80_labels_list.h"
+
 #define BOUNDARY_STRING "ExampleBoundaryString"
 
 typedef struct {
@@ -308,13 +310,13 @@ void* camera_thread_porc(void* data) {
             object_detect_result *det_result = &od_results.results[i];
             if (i > 0) arena_push_char(&builder, ',');
             arena_printf(&builder,
-                "{\"class\": \"%d\","
+                "{\"class\": \"%s\","
                 "\"minx\": %d,"
                 "\"miny\": %d,"
                 "\"maxx\": %d,"
                 "\"maxy\": %d,"
                 "\"confidence\": %.3f}",
-                det_result->cls_id,
+                label_get_name(det_result->cls_id),
                 det_result->box.left,
                 det_result->box.top,
                 det_result->box.right,
