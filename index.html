@@ -39,6 +39,70 @@
 
         let /** @type EventSource? */ event_source;
 
+        // Temporary BLE connection for testing
+
+        /** @enum {number} */
+        const Drive_State = Object.freeze({
+            Stop:       0,
+            Forward:    1,
+            SideLeft:   2,
+            SideRight:  3,
+            TurnLeft:   4,
+            TurnRight:  5,
+        })
+
+        let /** @type {?BluetoothRemoteGATTCharacteristic} */ ble_characteristic = null
+
+        function send_drive_command(/** @type Drive_State */ drive_state) {
+            if (ble_characteristic) {
+                const buffer = new Uint8Array(1)
+                buffer[0] = drive_state
+
+                function do_send() {
+                    ble_characteristic.writeValueWithResponse(buffer)
+                        .then(() => console.log("Command sent:", drive_state))
+                        .catch(() => {
+                            console.error("Send failed:", drive_state)
+                            do_send()
+                        })
+                }
+
+                do_send()
+
+            }
+        }
+
+        async function run_bluetooth() {
+            const bluetoothServiceUUID = "a0ba6193-d014-4eee-aa99-13c6b3b49711"
+
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [
+                    { namePrefix: "Xrp" },
+                ],
+                optionalServices: [bluetoothServiceUUID]
+                // acceptAllDevices: true,
+                // optionalServices: [bluetoothServiceUUID]
+            })
+            console.log(device)
+
+            device.ongattserverdisconnected = event => {
+                console.log("gatt server disconnected:", event)
+                ble_characteristic = null
+            }
+
+            if (device.gatt) {
+                const server = device.gatt
+                await server.connect()
+                console.log(server)
+                const service = await server.getPrimaryService(bluetoothServiceUUID)
+                console.log(service)
+                const characteristic = await service.getCharacteristic(bluetoothServiceUUID)
+                console.log(characteristic)
+                console.log("BLE connected")
+                ble_characteristic = characteristic
+            }
+        }
+
         event_button_reset();
         image_button_reset();
 
@@ -71,6 +135,8 @@
             return [dist_w, dist_h]
         }
 
+        let current_state = Drive_State.Stop
+
         function display_info(info) {
             let info_str = ""
             info_str += `camera frames: ${info.frame_count}\n`
@@ -78,25 +144,60 @@
             info_str += `FPS:           ${info.fps}\n`
             info_str += `\n`
             info_str += `Detections:\n`
+
+            let new_state = Drive_State.Stop
+
             for (const result of info.results) {
-                info_str += `  ${result.class}:`.padEnd(12, " ")
-                info_str += `(${result.minx} ${result.miny} ${result.maxx} ${result.maxy})`.padEnd(20, " ")
-                info_str += `${(result.confidence*100).toFixed(1)}%  `
+                if (result.class == "bottle") {
 
-                const minx = result.minx
-                const miny = result.miny
-                const maxx = result.maxx
-                const maxy = result.maxy
-                const w = maxx - minx
-                const h = maxy - miny
-                const x = (maxx + minx) / 2
-                const y = (maxy + miny) / 2
+                    info_str += `  ${result.class}:`.padEnd(12, " ")
+                    info_str += `(${result.minx} ${result.miny} ${result.maxx} ${result.maxy})`.padEnd(20, " ")
+                    info_str += `${(result.confidence*100).toFixed(1)}%  `
 
-                info_str += `w=${w}, h=${h}  `
+                    const minx = result.minx
+                    const miny = result.miny
+                    const maxx = result.maxx
+                    const maxy = result.maxy
+                    const w = maxx - minx
+                    const h = maxy - miny
+                    const x = (maxx + minx) / 2
+                    const y = (maxy + miny) / 2
 
-                info_str += `\n`
+                    const f = 800;
+
+                    info_str += `w=${w}, h=${h}  `
+
+                    let W = 0
+                    let H = 0
+
+                    if (result.class == "person") {
+                        W = 0.5
+                        H = 1.7
+                    }
+
+                    if (result.class == "bottle") {
+                        W = 0.06
+                        H = 0.24
+                    }
+
+                    const D_h = f * (H / h);    // distance based on width
+                    const D_w = f * (W / w);    // distance based on height
+
+                    info_str += `D_h=${D_h}, D_w=${D_w}  `
+
+                    if (D_w < 0.3) {
+                        new_state = Drive_State.SideLeft
+                    }
+
+                    info_str += `\n`
+                }
             }
             info_container.innerText = info_str;
+
+            if (new_state != current_state) {
+                send_drive_command(new_state)
+                current_state = new_state
+            }
         }
 
         function event_source_on_stream_info(info) {
