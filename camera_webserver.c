@@ -17,8 +17,17 @@ typedef struct {
     Connection* mjpg_streaming_clients[10];
     Connection* esp_connection;
 
+    unsigned char output_state;
+
     rknn_app_context_t* rknn_app_ctx;
 } App_State;
+
+enum Output_Value {
+    Output1 = (1<<0),
+    Output2 = (1<<1),
+    Output3 = (1<<2),
+    Output4 = (1<<3),
+};
 
 bool connections_add(Connection* connections[], size_t connection_count, Connection* connection) {
     Connection** result = NULL;
@@ -121,7 +130,7 @@ int state_mjpg_stream_write_data(App_State* state, string jpeg_data) {
 bool on_data(Connection* connection, char* buf, size_t len, void* data) {
     App_State* state = data;
     string message = {buf, len};
-    if (string_starts_with(message, string_from_cstr("XRP "))) {
+    if (string_starts_with(message, string_from_cstr("ESP "))) {
         log_print("[INFO] got connection from esp32: %.*s\n", (int)message.len, message.data);
         if (state->esp_connection) {
             log_error("Got new esp32 connection when one is already present\n");
@@ -138,6 +147,21 @@ void on_new_connection(Connection* connection, uint32_t addr, uint16_t port, voi
     (void)addr;
     (void)port;
     (void)data;
+}
+
+void handle_esp_output(Connection* connection, App_State* state, enum Output_Value value) {
+    state->output_state ^= value;
+    log_print(
+        "current state: %d%d%d%d\n",
+        (bool)(state->output_state & Output1),
+        (bool)(state->output_state & Output2),
+        (bool)(state->output_state & Output3),
+        (bool)(state->output_state & Output4));
+
+    if (state->esp_connection) {
+        connection_write(state->esp_connection, (char*)&state->output_state, sizeof(state->output_state));
+    }
+    http_write_response_text(connection, 200, "OK");
 }
 
 void on_get_request(Connection* connection, string url, void* data) {
@@ -191,6 +215,14 @@ void on_get_request(Connection* connection, string url, void* data) {
         arena_printf(&builder, "Broadcasted message to %d sse clients\n", write_count);
         http_write_response_text(connection, 200, builder.base);
         return;
+    } else if (string_eq(url, string_from_cstr("/1"))) {
+        handle_esp_output(connection, state, Output1);
+    } else if (string_eq(url, string_from_cstr("/2"))) {
+        handle_esp_output(connection, state, Output2);
+    } else if (string_eq(url, string_from_cstr("/3"))) {
+        handle_esp_output(connection, state, Output3);
+    } else if (string_eq(url, string_from_cstr("/3"))) {
+        handle_esp_output(connection, state, Output4);
     }
 
     http_write_response_text(connection, 404, "Page not found");
@@ -268,6 +300,16 @@ bool load_jpeg_image_from_memory(const unsigned char* buf, size_t len, image_buf
     return true;
 }
 
+void process_result(object_detect_result *det_result) {
+    switch (det_result->cls_id) {
+        case Label_person:
+        case Label_bicycle:
+        case Label_car:
+        case Label_motorcycle:
+        case Label_bus:
+    }
+}
+
 void* camera_thread_porc(void* data) {
     App_State* state = data;
 
@@ -337,6 +379,8 @@ void* camera_thread_porc(void* data) {
         arena_printf(&builder, "\"results\": [");
         for (int i = 0; i < od_results.count; i++) {
             object_detect_result *det_result = &od_results.results[i];
+            process_result(det_result);
+
             if (i > 0) arena_push_char(&builder, ',');
             arena_printf(&builder,
                 "{\"class\": \"%s\","
