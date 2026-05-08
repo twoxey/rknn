@@ -4,5 +4,6 @@ main
 camera
 camera_webserver
 yolo11-test
+uart_test
 out.png
 

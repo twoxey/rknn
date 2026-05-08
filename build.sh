@@ -55,3 +55,8 @@ g++ -o camera_webserver \
     librga/Linux/aarch64/librga.a \
     rknpu2/Linux/aarch64/librknnrt.so
 
+echo "Building uart test..."
+
+gcc $COMMON_FLAGS -o uart_test uart-test.c
+
+
