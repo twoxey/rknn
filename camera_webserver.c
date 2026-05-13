@@ -272,6 +272,8 @@ void on_get_request(Connection* connection, string url, void* data) {
         drive_set_state(connection, state, Drive_TurnLeft);
     } else if (string_eq(url, string_from_cstr("/Drive_TurnRight"))) {
         drive_set_state(connection, state, Drive_TurnRight);
+    } else if (string_eq(url, string_from_cstr("/Drive_Backward"))) {
+        drive_set_state(connection, state, Drive_Backward);
     } else if (string_eq(url, string_from_cstr("/1"))) {
         handle_esp_output(connection, state, ESP_Output1);
     } else if (string_eq(url, string_from_cstr("/2"))) {
