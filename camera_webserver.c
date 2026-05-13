@@ -6,6 +6,7 @@
 #include "stb_image.h"
 
 #include "coco_80_labels_list.h"
+#include "esp32-program/haptic-motor-states.h"
 
 #define BOUNDARY_STRING "ExampleBoundaryString"
 
@@ -16,7 +17,15 @@ typedef enum {
     Drive_SideRight,
     Drive_TurnLeft,
     Drive_TurnRight,
-} Drive_State;
+    Drive_Backward,
+};
+
+enum ESP_Output_Value {
+    ESP_Output1 = (1<<0),
+    ESP_Output2 = (1<<1),
+    ESP_Output3 = (1<<2),
+    ESP_Output4 = (1<<3),
+};
 
 typedef struct {
     volatile bool should_close;
@@ -28,17 +37,16 @@ typedef struct {
     Connection* esp_connection;
 
     int drive_train_uart;
-    unsigned char output_state;
+
+    unsigned char esp_output_state;
+
+    Drive_State drive_default_state;
+    Drive_State drive_current_state;
+
+    Haptic_States current_haptic_states;
 
     rknn_app_context_t* rknn_app_ctx;
 } App_State;
-
-enum Output_Value {
-    Output1 = (1<<0),
-    Output2 = (1<<1),
-    Output3 = (1<<2),
-    Output4 = (1<<3),
-};
 
 bool connections_add(Connection* connections[], size_t connection_count, Connection* connection) {
     Connection** result = NULL;
@@ -160,17 +168,17 @@ void on_new_connection(Connection* connection, uint32_t addr, uint16_t port, voi
     (void)data;
 }
 
-void handle_esp_output(Connection* connection, App_State* state, enum Output_Value value) {
-    state->output_state ^= value;
+void handle_esp_output(Connection* connection, App_State* state, enum ESP_Output_Value value) {
+    state->esp_output_state ^= value;
     log_print(
         "current state: %d%d%d%d\n",
-        (bool)(state->output_state & Output1),
-        (bool)(state->output_state & Output2),
-        (bool)(state->output_state & Output3),
-        (bool)(state->output_state & Output4));
+        (bool)(state->esp_output_state & ESP_Output1),
+        (bool)(state->esp_output_state & ESP_Output2),
+        (bool)(state->esp_output_state & ESP_Output3),
+        (bool)(state->esp_output_state & ESP_Output4));
 
     if (state->esp_connection) {
-        connection_write(state->esp_connection, (char*)&state->output_state, sizeof(state->output_state));
+        connection_write(state->esp_connection, (char*)&state->esp_output_state, sizeof(state->esp_output_state));
     }
     http_write_response_text(connection, 200, "OK");
 }
@@ -265,11 +273,11 @@ void on_get_request(Connection* connection, string url, void* data) {
     } else if (string_eq(url, string_from_cstr("/Drive_TurnRight"))) {
         drive_set_state(connection, state, Drive_TurnRight);
     } else if (string_eq(url, string_from_cstr("/1"))) {
-        handle_esp_output(connection, state, Output1);
+        handle_esp_output(connection, state, ESP_Output1);
     } else if (string_eq(url, string_from_cstr("/2"))) {
-        handle_esp_output(connection, state, Output2);
+        handle_esp_output(connection, state, ESP_Output2);
     } else if (string_eq(url, string_from_cstr("/3"))) {
-        handle_esp_output(connection, state, Output3);
+        handle_esp_output(connection, state, ESP_Output3);
     } else if (string_eq(url, string_from_cstr("/3"))) {
         handle_esp_output(connection, state, Output4);
     } else {
@@ -325,6 +333,10 @@ float time_diff(struct timespec a, struct timespec b) {
     return (a.tv_sec - b.tv_sec) + (float)(a.tv_nsec - b.tv_nsec) / 1e9f;
 }
 
+long time_diff_ms(struct timespec a, struct timespec b) {
+    return (a.tv_sec - b.tv_sec) * 1000 + (a.tv_nsec - b.tv_nsec) / 1e6;
+}
+
 bool load_jpeg_image_from_memory(const unsigned char* buf, size_t len, image_buffer_t* image) {
     *image = (image_buffer_t){};
 
@@ -349,14 +361,58 @@ bool load_jpeg_image_from_memory(const unsigned char* buf, size_t len, image_buf
     return true;
 }
 
-void process_result(object_detect_result *det_result) {
+typedef struct {
+    Haptic_Motor_State haptic_state;
+    float pos_x;
+    bool should_go_sideway;
+} Process_Result;
+
+Process_Result process_result(object_detect_result *det_result) {
+    float f = 800;
+
+    float H, W;
+    float notify_threshold, warn_theshold;
     switch (det_result->cls_id) {
-        case Label_person:
-        case Label_bicycle:
-        case Label_car:
-        case Label_motorcycle:
-        case Label_bus:
+        case Label_person:      H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        case Label_bicycle:     H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        case Label_car:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        case Label_motorcycle:  H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        case Label_bus:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        default: return;  // ignore other objects
     }
+
+    // // reject certain results?
+    // float confidence_threshold = ;
+    // if (det_result->prop < confidence_threshold) return;
+
+    int minx = det_result->box.left;
+    int miny = det_result->box.top;
+    int maxx = det_result->box.right;
+    int maxy = det_result->box.bottom;
+
+    float w = maxx - minx;
+    float h = maxy - miny;
+
+    float pos_x = (minx + maxx) * 0.5f;
+    float pos_y = (minx + maxx) * 0.5f;
+
+    float D_h = f * (H / h);    // distance based on width
+    float D_w = f * (W / w);    // distance based on height
+
+    float D = D_h;  // TODO: figure out which result to use
+
+    Process_Result result = {};
+    if (D < warn_theshold) {
+        result.haptic_state = Haptic_Fast;
+    } else if (D < notify_threshold) {
+        result.haptic_state = Haptic_Slow;
+    } else {
+        result.haptic_state = Haptic_Stop;
+    }
+    result.pos_x = pos_x;
+    result.should_go_sideway = D < warn_theshold;
+
+    return result;
 }
 
 void* camera_thread_porc(void* data) {
@@ -394,13 +450,15 @@ void* camera_thread_porc(void* data) {
 
         if (!camera_queue_buffer(cam, index)) goto end;
 
+        if (!image_loaded) continue;
+
         object_detect_result_list od_results = {};
-        if (image_loaded) {
-            int ret = inference_yolo11_model(state->rknn_app_ctx, &image, &od_results);
-            if (ret != 0) {
-                log_error("init_yolo11_model fail! ret=%d\n", ret);
-            }
-            free(image.virt_addr);
+        int ret = inference_yolo11_model(state->rknn_app_ctx, &image, &od_results);
+        free(image.virt_addr);
+
+        if (ret != 0) {
+            log_error("inference_yolo11_model failed: ret=%d\n", ret);
+            continue;
         }
 
         ++frame_count;
@@ -426,9 +484,35 @@ void* camera_thread_porc(void* data) {
             sent_count,
             fps);
         arena_printf(&builder, "\"results\": [");
+
+        Haptic_Motor_State s0 = Haptic_Stop;
+        Haptic_Motor_State s1 = Haptic_Stop;
+        Haptic_Motor_State s2 = Haptic_Stop;
+        Haptic_Motor_State s3 = Haptic_Stop;
+
+        Drive_State drive_state = state->drive_default_state;
+
         for (int i = 0; i < od_results.count; i++) {
             object_detect_result *det_result = &od_results.results[i];
-            process_result(det_result);
+            Process_Result result = process_result(det_result);
+            float horizontal_position = result.pos_x / image.width;
+            if (horizontal_position < 0.33) {
+                // left
+                if (result.haptic_state > s0) s0 = result.haptic_state;
+                if (result.haptic_state > s1) s1 = result.haptic_state;
+            } else if (horizontal_position < 0.66) {
+                // middle
+                if (result.haptic_state > s1) s1 = result.haptic_state;
+                if (result.haptic_state > s2) s2 = result.haptic_state;
+            } else {
+                // right
+                if (result.haptic_state > s2) s2 = result.haptic_state;
+                if (result.haptic_state > s3) s3 = result.haptic_state;
+            }
+
+            if (result.should_go_sideway) {
+                drive_state = Drive_SideLeft;
+            }
 
             if (i > 0) arena_push_char(&builder, ',');
             arena_printf(&builder,
@@ -445,6 +529,15 @@ void* camera_thread_porc(void* data) {
                 det_result->box.bottom,
                 det_result->prop);
         }
+
+        Haptic_States haptic_states = haptic_motor_pack_states(s0, s1, s2, s3);
+        if (haptic_states != state->current_haptic_states) {
+            // TODO: send states to ESP32
+            state->current_haptic_states = haptic_states;
+        }
+
+        // TODO: set drive train state
+
         arena_push_char(&builder, ']');
         arena_push_char(&builder, '}');
 
@@ -507,7 +600,7 @@ int main(void) {
     }
     /*
     Thread* message_thread = thread_start(message_thread_proc, &state);
-    if (!server_thread) {
+    if (!message_thread) {
         log_error("Failed to start message thread\n");
         return 1;
     }

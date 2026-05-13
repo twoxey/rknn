@@ -29,6 +29,9 @@ bool camera_stop_streaming(struct camera* cam);
 int  camera_dequeue_buffer(struct camera* cam, struct mapped_buffer* buffer);
 bool camera_queue_buffer(struct camera* cam, int index);
 
+struct pixel_format camera_get_pixel_format(struct camera* cam);
+bool camera_set_pixel_format(struct camera* cam, struct pixel_format format);
+
 bool camera_enumerate_pixel_formats(struct camera* cam, struct pixel_format* formats, size_t* format_count, unsigned int match_fourcc /*optional*/);
 bool camera_enumerate_frame_sizes(struct camera* cam, unsigned int pixelformat, struct pixel_format* formats, size_t* format_count);
 bool camera_enumerate_frame_intervals(struct camera* cam, struct pixel_format format, struct fraction* intervals, size_t* interval_count);
@@ -371,6 +374,15 @@ bool camera_stop_streaming(struct camera* cam) {
     return true;
 }
 
+struct pixel_format camera_get_pixel_format(struct camera* cam) {
+    struct pixel_format result = {
+        .fourcc = cam->device_format.pixelformat,
+        .width  = cam->device_format.width,
+        .height = cam->device_format.height,
+    };
+    return result;
+}
+
 bool camera_set_pixel_format(struct camera* cam, struct pixel_format format) {
     if (cam->started) {
         if (!camera_stop_streaming(cam)) return false;
@@ -395,6 +407,8 @@ bool camera_set_pixel_format(struct camera* cam, struct pixel_format format) {
         }
         return camera_set_pixel_format(cam, format);
     }
+
+    cam->device_format = pix;
 
     fprintf(stderr, "[INFO] Camera set pixel format, current format:\n");
     fprintf(stderr, "  width:  %u\n", pix.width);
