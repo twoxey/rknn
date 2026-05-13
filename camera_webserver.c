@@ -34,15 +34,12 @@ typedef struct {
 
     Connection* sse_clients[10];
     Connection* mjpg_streaming_clients[10];
-    Connection* esp_connection;
 
     int drive_train_uart;
-
-    unsigned char esp_output_state;
-
     Drive_State drive_default_state;
     Drive_State drive_current_state;
 
+    int esp_connection;
     Haptic_States current_haptic_states;
 
     rknn_app_context_t* rknn_app_ctx;
@@ -168,39 +165,60 @@ void on_new_connection(Connection* connection, uint32_t addr, uint16_t port, voi
     (void)data;
 }
 
-void handle_esp_output(Connection* connection, App_State* state, enum ESP_Output_Value value) {
-    state->esp_output_state ^= value;
-    log_print(
-        "current state: %d%d%d%d\n",
-        (bool)(state->esp_output_state & ESP_Output1),
-        (bool)(state->esp_output_state & ESP_Output2),
-        (bool)(state->esp_output_state & ESP_Output3),
-        (bool)(state->esp_output_state & ESP_Output4));
+bool send_haptic_states(App_State* state, Haptic_States haptic_states) {
+    if (state->esp_connection < 0) return false;
+    if (state->current_haptic_states == haptic_states) return true;
 
-    if (state->esp_connection) {
-        connection_write(state->esp_connection, (char*)&state->esp_output_state, sizeof(state->esp_output_state));
+    Haptic_States data = haptic_states;
+    ssize_t bytes_written = write(state->esp_connection, &data, sizeof(data));
+    if (bytes_written < 0) {
+        log_error("write(esp_connection) failed: %s\n", strerror(errno));
+        state->esp_connection = -1;
+        return false;
     }
-    http_write_response_text(connection, 200, "OK");
+
+    state->current_haptic_states = haptic_states;
+    return true;
 }
 
-bool drive_set_state(Connection* connection, App_State* state, Drive_State drive_state) {
-    bool result = false;
-    if (state->drive_train_uart) {
-        unsigned char data = drive_state;
-        ssize_t bytes_written = write(state->drive_train_uart, &data, sizeof(data));
-        if (bytes_written < 0) {
-            log_error("write(drive_train_uart) failed: %s\n", strerror(errno));
-            state->drive_train_uart = 0;
-        }
-        log_print("Set drive train to state: %d\n", drive_state);
-        result = true;
+void handle_esp_output_request(Connection* connection, App_State* state, int req_num) {
+    Haptic_States haptic_states = 0;
+    switch (req_num) {
+        case 1: haptic_states = haptic_motor_pack_states(Haptic_Fast, Haptic_Stop, Haptic_Stop, Haptic_Stop); break;
+        case 2: haptic_states = haptic_motor_pack_states(Haptic_Stop, Haptic_Fast, Haptic_Stop, Haptic_Stop); break;
+        case 3: haptic_states = haptic_motor_pack_states(Haptic_Stop, Haptic_Stop, Haptic_Slow, Haptic_Stop); break;
+        case 4: haptic_states = haptic_motor_pack_states(Haptic_Stop, Haptic_Stop, Haptic_Stop, Haptic_Slow); break;
     }
-    if (result) {
+    bool ok = send_haptic_states(state, haptic_states);
+    if (ok) {
+        http_write_response_text(connection, 200, "OK, successfully set haptic states");
+    } else {
+        http_write_response_text(connection, 500, "Failed to set haptic states");
+    }
+}
+
+bool drive_set_state(App_State* state, Drive_State drive_state) {
+    if (state->drive_train_uart < 0) return false;
+
+    unsigned char data = drive_state;
+    ssize_t bytes_written = write(state->drive_train_uart, &data, sizeof(data));
+    if (bytes_written < 0) {
+        log_error("write(drive_train_uart) failed: %s\n", strerror(errno));
+        state->drive_train_uart = -1;
+        return false;
+    }
+
+    log_print("Set drive train to state: %d\n", drive_state);
+    return true;
+}
+
+void handle_drive_state_request(Connection* connection, App_State* state, Drive_State drive_state) {
+    bool ok = drive_set_state(state, drive_state);
+    if (ok) {
         http_write_response_text(connection, 200, "OK, successfully set drive train state");
     } else {
         http_write_response_text(connection, 500, "Failed to set drive train state");
     }
-    return result;
 }
 
 void on_get_request(Connection* connection, string url, void* data) {
@@ -260,29 +278,23 @@ void on_get_request(Connection* connection, string url, void* data) {
         http_write_response_text(connection, 200, "Server closed");
         return;
 
-    } else if (string_eq(url, string_from_cstr("/Drive_Stop"))) {
-        drive_set_state(connection, state, Drive_Stop);
-    } else if (string_eq(url, string_from_cstr("/Drive_Forward"))) {
-        drive_set_state(connection, state, Drive_Forward);
-    } else if (string_eq(url, string_from_cstr("/Drive_SideLeft"))) {
-        drive_set_state(connection, state, Drive_SideLeft);
-    } else if (string_eq(url, string_from_cstr("/Drive_SideRight"))) {
-        drive_set_state(connection, state, Drive_SideRight);
-    } else if (string_eq(url, string_from_cstr("/Drive_TurnLeft"))) {
-        drive_set_state(connection, state, Drive_TurnLeft);
-    } else if (string_eq(url, string_from_cstr("/Drive_TurnRight"))) {
-        drive_set_state(connection, state, Drive_TurnRight);
-    } else if (string_eq(url, string_from_cstr("/Drive_Backward"))) {
-        drive_set_state(connection, state, Drive_Backward);
-    } else if (string_eq(url, string_from_cstr("/1"))) {
-        handle_esp_output(connection, state, ESP_Output1);
-    } else if (string_eq(url, string_from_cstr("/2"))) {
-        handle_esp_output(connection, state, ESP_Output2);
-    } else if (string_eq(url, string_from_cstr("/3"))) {
-        handle_esp_output(connection, state, ESP_Output3);
-    } else if (string_eq(url, string_from_cstr("/3"))) {
-        handle_esp_output(connection, state, Output4);
-    } else {
+    }
+
+    else if (string_eq(url, string_from_cstr("/Drive_Stop")))         { handle_drive_state_request(connection, state, Drive_Stop);      }
+    else if (string_eq(url, string_from_cstr("/Drive_Forward")))      { handle_drive_state_request(connection, state, Drive_Forward);   }
+    else if (string_eq(url, string_from_cstr("/Drive_SideLeft")))     { handle_drive_state_request(connection, state, Drive_SideLeft);  }
+    else if (string_eq(url, string_from_cstr("/Drive_SideRight")))    { handle_drive_state_request(connection, state, Drive_SideRight); }
+    else if (string_eq(url, string_from_cstr("/Drive_TurnLeft")))     { handle_drive_state_request(connection, state, Drive_TurnLeft);  }
+    else if (string_eq(url, string_from_cstr("/Drive_TurnRight")))    { handle_drive_state_request(connection, state, Drive_TurnRight); }
+    else if (string_eq(url, string_from_cstr("/Drive_Backward")))     { handle_drive_state_request(connection, state, Drive_Backward);  }
+
+    else if (string_eq(url, string_from_cstr("/0"))) { handle_esp_output_request(connection, state, 0); }
+    else if (string_eq(url, string_from_cstr("/1"))) { handle_esp_output_request(connection, state, 1); }
+    else if (string_eq(url, string_from_cstr("/2"))) { handle_esp_output_request(connection, state, 2); }
+    else if (string_eq(url, string_from_cstr("/3"))) { handle_esp_output_request(connection, state, 3); }
+    else if (string_eq(url, string_from_cstr("/4"))) { handle_esp_output_request(connection, state, 4); }
+
+    else {
         http_write_response_text(connection, 404, "Page not found");
     }
 }
@@ -441,10 +453,9 @@ void* camera_thread_porc(void* data) {
     while (!state->should_close) {
         struct mapped_buffer buffer;
         int index = camera_dequeue_buffer(cam, &buffer);
+        if (index < 0) goto end;
 
         struct timespec current_time = get_time();
-
-        if (index < 0) goto end;
 
         image_buffer_t image = {};
         bool image_loaded = load_jpeg_image_from_memory(buffer.start, buffer.length, &image);
@@ -554,16 +565,48 @@ end:
     return NULL;
 }
 
+int tcp_socket_connect(uint32_t addr, uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        log_error("socket() failed: %s\n", strerror(errno));
+        goto error;
+    }
+    struct sockaddr_in addr_in = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr.s_addr = addr,
+    };
+    if (connect(fd, (struct sockaddr*)&addr_in, sizeof(addr_in)) < 0) {
+        log_error("connect() failed: %s\n", strerror(errno));
+        goto error;
+    }
+    return fd;
+
+error:
+    if (fd >= 0) close(fd);
+    return -1;
+}
+
 void* message_thread_proc(void* data) {
     App_State* state = data;
 
     struct timespec start_time = get_time();
-    int message_id = 0;
+
     while (!state->should_close) {
         float secs = time_diff(get_time(), start_time);
-        state_sse_write_message(state, NULL, arena_printf(&TEMP_ARENA(1024), "Message id: %d, time elapsed: %f\n", message_id, secs));
-        ++message_id;
+
+        if (state->esp_connection < 0) {
+            uint32_t addr = *(uint32_t*)(uint8_t[4]){192, 168, 4, 1};
+            uint16_t port = 8080;
+            log_print("Connecting to esp32, addr: " ADDR_PRI ":%u\n", ADDR_ARG(addr), port);
+            state->esp_connection = tcp_socket_connect(addr, port);
+        }
+
         sleep(2);
+    }
+    if (state->esp_connection >= 0) {
+        close(state->esp_connection);
+        state->esp_connection = -1;
     }
 
     return NULL;
@@ -590,6 +633,9 @@ int main(void) {
 
     state.drive_train_uart = port;
 
+    // init connection fd to -1
+    state->esp_connection = -1;
+
     Thread* server_thread = thread_start(server_thread_porc, &state);
     if (!server_thread) {
         log_error("Failed to start server thread\n");
@@ -600,17 +646,17 @@ int main(void) {
         log_error("Failed to start camera thread\n");
         return 1;
     }
-    /*
+
+    // Thread for handling connection to the esp32
     Thread* message_thread = thread_start(message_thread_proc, &state);
     if (!message_thread) {
         log_error("Failed to start message thread\n");
         return 1;
     }
-    */
 
     thread_join(camera_thread, NULL);
     thread_join(server_thread, NULL);
-    //thread_join(message_thread, NULL);
+    thread_join(message_thread, NULL);
 
     close(state.drive_train_uart);
 
