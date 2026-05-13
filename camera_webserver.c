@@ -1,5 +1,6 @@
 #include "http_server.h"
 #include "camera.h"
+#include "uart.h"
 
 #include "yolo11.h"
 #include "stb_image.h"
@@ -7,6 +8,15 @@
 #include "coco_80_labels_list.h"
 
 #define BOUNDARY_STRING "ExampleBoundaryString"
+
+typedef enum {
+    Drive_Stop,
+    Drive_Forward,
+    Drive_SideLeft,
+    Drive_SideRight,
+    Drive_TurnLeft,
+    Drive_TurnRight,
+} Drive_State;
 
 typedef struct {
     volatile bool should_close;
@@ -17,6 +27,7 @@ typedef struct {
     Connection* mjpg_streaming_clients[10];
     Connection* esp_connection;
 
+    int drive_train_uart;
     unsigned char output_state;
 
     rknn_app_context_t* rknn_app_ctx;
@@ -164,6 +175,26 @@ void handle_esp_output(Connection* connection, App_State* state, enum Output_Val
     http_write_response_text(connection, 200, "OK");
 }
 
+bool drive_set_state(Connection* connection, App_State* state, Drive_State drive_state) {
+    bool result = false;
+    if (state->drive_train_uart) {
+        unsigned char data = drive_state;
+        ssize_t bytes_written = write(state->drive_train_uart, &data, sizeof(data));
+        if (bytes_written < 0) {
+            log_error("write(drive_train_uart) failed: %s\n", strerror(errno));
+            state->drive_train_uart = 0;
+        }
+        log_print("Set drive train to state: %d\n", drive_state);
+        result = true;
+    }
+    if (result) {
+        http_write_response_text(connection, 200, "OK, successfully set drive train state");
+    } else {
+        http_write_response_text(connection, 500, "Failed to set drive train state");
+    }
+    return result;
+}
+
 void on_get_request(Connection* connection, string url, void* data) {
     App_State* state = data;
     if (string_eq(url, string_from_cstr("/"))) {
@@ -215,6 +246,24 @@ void on_get_request(Connection* connection, string url, void* data) {
         arena_printf(&builder, "Broadcasted message to %d sse clients\n", write_count);
         http_write_response_text(connection, 200, builder.base);
         return;
+    } else if (string_eq(url, string_from_cstr("/quit"))) {
+        state->should_close = true;
+
+        http_write_response_text(connection, 200, "Server closed");
+        return;
+
+    } else if (string_eq(url, string_from_cstr("/Drive_Stop"))) {
+        drive_set_state(connection, state, Drive_Stop);
+    } else if (string_eq(url, string_from_cstr("/Drive_Forward"))) {
+        drive_set_state(connection, state, Drive_Forward);
+    } else if (string_eq(url, string_from_cstr("/Drive_SideLeft"))) {
+        drive_set_state(connection, state, Drive_SideLeft);
+    } else if (string_eq(url, string_from_cstr("/Drive_SideRight"))) {
+        drive_set_state(connection, state, Drive_SideRight);
+    } else if (string_eq(url, string_from_cstr("/Drive_TurnLeft"))) {
+        drive_set_state(connection, state, Drive_TurnLeft);
+    } else if (string_eq(url, string_from_cstr("/Drive_TurnRight"))) {
+        drive_set_state(connection, state, Drive_TurnRight);
     } else if (string_eq(url, string_from_cstr("/1"))) {
         handle_esp_output(connection, state, Output1);
     } else if (string_eq(url, string_from_cstr("/2"))) {
@@ -223,9 +272,9 @@ void on_get_request(Connection* connection, string url, void* data) {
         handle_esp_output(connection, state, Output3);
     } else if (string_eq(url, string_from_cstr("/3"))) {
         handle_esp_output(connection, state, Output4);
+    } else {
+        http_write_response_text(connection, 404, "Page not found");
     }
-
-    http_write_response_text(connection, 404, "Page not found");
 }
 
 void on_close(Connection* connection, void* data) {
@@ -253,7 +302,7 @@ void* server_thread_porc(void* data) {
     if (server) {
         state->server_started = true;
 
-        while (http_server_run_loop(server)) {};
+        while (!state->should_close && http_server_run_loop(server)) {};
 
         state->server_started = false;
         http_server_deinit(server);
@@ -438,6 +487,14 @@ int main(void) {
     }
     state.rknn_app_ctx = &rknn_app_ctx;
 
+    int port = uart_start("/dev/ttyS4", B9600);
+    if (port < 0) {
+        log_error("Failed to open serial port\n");
+        return 1;
+    }
+
+    state.drive_train_uart = port;
+
     Thread* server_thread = thread_start(server_thread_porc, &state);
     if (!server_thread) {
         log_error("Failed to start server thread\n");
@@ -459,6 +516,8 @@ int main(void) {
     thread_join(camera_thread, NULL);
     thread_join(server_thread, NULL);
     //thread_join(message_thread, NULL);
+
+    close(state.drive_train_uart);
 
     ret = release_yolo11_model(&rknn_app_ctx);
     if (ret != 0) {

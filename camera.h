@@ -466,7 +466,8 @@ struct camera* camera_init(const char* device_name) {
     }
 
     fprintf(stderr, "Select a pixel format [0]: \n");
-    int idx = stdin_get_number(formats_count);
+    //int idx = stdin_get_number(formats_count);
+    int idx = 0;
     struct pixel_format fmt = formats[idx];
     fprintf(stderr, "Selected frame size: %ux%u\n", fmt.width, fmt.height);
 
@@ -490,7 +491,8 @@ struct camera* camera_init(const char* device_name) {
     }
 
     fprintf(stderr, "Select a frame interval: ");
-    idx = stdin_get_number(interval_count);
+    //idx = stdin_get_number(interval_count);
+    idx = 0;
 
     struct v4l2_fract timeperframe = {intervals[idx].numerator, intervals[idx].denominator};
     video_capture_set_frame_interval(cam->fd, &timeperframe);
