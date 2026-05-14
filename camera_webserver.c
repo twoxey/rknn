@@ -18,7 +18,7 @@ typedef enum {
     Drive_TurnLeft,
     Drive_TurnRight,
     Drive_Backward,
-};
+} Drive_State;
 
 enum ESP_Output_Value {
     ESP_Output1 = (1<<0),
@@ -35,11 +35,13 @@ typedef struct {
     Connection* sse_clients[10];
     Connection* mjpg_streaming_clients[10];
 
+    bool test_is_running;
+
     int drive_train_uart;
-    Drive_State drive_default_state;
     Drive_State drive_current_state;
 
     int esp_connection;
+    bool esp_reconnect;
     Haptic_States current_haptic_states;
 
     rknn_app_context_t* rknn_app_ctx;
@@ -146,15 +148,15 @@ int state_mjpg_stream_write_data(App_State* state, string jpeg_data) {
 bool on_data(Connection* connection, char* buf, size_t len, void* data) {
     App_State* state = data;
     string message = {buf, len};
-    if (string_starts_with(message, string_from_cstr("ESP "))) {
-        log_print("[INFO] got connection from esp32: %.*s\n", (int)message.len, message.data);
-        if (state->esp_connection) {
-            log_error("Got new esp32 connection when one is already present\n");
-            return false;
-        }
-        state->esp_connection = connection;
-        return true;
-    }
+    //if (string_starts_with(message, string_from_cstr("ESP "))) {
+    //    log_print("[INFO] got connection from esp32: %.*s\n", (int)message.len, message.data);
+    //    if (state->esp_connection) {
+    //        log_error("Got new esp32 connection when one is already present\n");
+    //        return false;
+    //    }
+    //    state->esp_connection = connection;
+    //    return true;
+    //}
     return false;
 }
 
@@ -174,6 +176,7 @@ bool send_haptic_states(App_State* state, Haptic_States haptic_states) {
     if (bytes_written < 0) {
         log_error("write(esp_connection) failed: %s\n", strerror(errno));
         state->esp_connection = -1;
+        state->esp_reconnect = true;
         return false;
     }
 
@@ -208,7 +211,9 @@ bool drive_set_state(App_State* state, Drive_State drive_state) {
         return false;
     }
 
-    log_print("Set drive train to state: %d\n", drive_state);
+    state->drive_current_state = drive_state;
+
+    //log_print("Set drive train to state: %d\n", drive_state);
     return true;
 }
 
@@ -262,12 +267,12 @@ void on_get_request(Connection* connection, string url, void* data) {
     } else if (string_eq(url, string_from_cstr("/broadcast"))) {
         Arena builder = TEMP_ARENA(1024);
         bool ok = false;
-        if (state->esp_connection) {
-            string message = string_from_cstr("broadcast esp32");
-            ok = connection_write(state->esp_connection, message.data, message.len);
-        }
-        arena_printf(&builder, "Esp connected: %d\n", (bool)state->esp_connection);
-        arena_printf(&builder, "Esp write succeeded: %d\n", ok);
+        //if (state->esp_connection) {
+        //    string message = string_from_cstr("broadcast esp32");
+        //    ok = connection_write(state->esp_connection, message.data, message.len);
+        //}
+        //arena_printf(&builder, "Esp connected: %d\n", (bool)state->esp_connection);
+        //arena_printf(&builder, "Esp write succeeded: %d\n", ok);
         int write_count = state_sse_write_message(state, NULL, (string){builder.base, builder.used});
         arena_printf(&builder, "Broadcasted message to %d sse clients\n", write_count);
         http_write_response_text(connection, 200, builder.base);
@@ -275,9 +280,23 @@ void on_get_request(Connection* connection, string url, void* data) {
     } else if (string_eq(url, string_from_cstr("/quit"))) {
         state->should_close = true;
 
+        drive_set_state(state, Drive_Stop);
+        send_haptic_states(state, 0);
         http_write_response_text(connection, 200, "Server closed");
         return;
 
+    }
+
+    else if (string_eq(url, string_from_cstr("/run_test"))) {
+        state->test_is_running = !state->test_is_running;
+        if (state->test_is_running) {
+            log_print("Start running\n");
+        } else {
+            log_print("Stop running\n");
+            drive_set_state(state, Drive_Stop);
+            send_haptic_states(state, 0);
+        }
+        http_write_response_text(connection, 200, "OK");
     }
 
     else if (string_eq(url, string_from_cstr("/Drive_Stop")))         { handle_drive_state_request(connection, state, Drive_Stop);      }
@@ -301,11 +320,11 @@ void on_get_request(Connection* connection, string url, void* data) {
 
 void on_close(Connection* connection, void* data) {
     App_State* state = data;
-    if (connection == state->esp_connection) {
+    /*if (connection == state->esp_connection) {
         state->esp_connection = NULL;
         log_print("[INFO] esp32 disconnected\n");
         state_sse_write_message(state, NULL, string_from_cstr("esp disconnected"));
-    } else {
+    } else*/ {
         state_remove_client(state, connection);
     }
 }
@@ -376,24 +395,31 @@ bool load_jpeg_image_from_memory(const unsigned char* buf, size_t len, image_buf
 }
 
 typedef struct {
+    bool is_important;
+    float D_h;
+    float D_w;
     Haptic_Motor_State haptic_state;
     float pos_x;
     bool should_go_sideway;
 } Process_Result;
 
 Process_Result process_result(object_detect_result *det_result) {
+    Process_Result result = {};
+
     float f = 800;
 
     float H, W;
     float notify_threshold, warn_theshold;
     switch (det_result->cls_id) {
-        case Label_person:      H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
-        case Label_bicycle:     H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
-        case Label_car:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
-        case Label_motorcycle:  H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
-        case Label_bus:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
-        default: return;  // ignore other objects
+        case Label_person:      H = 1.7f;    W = 0.5f;  notify_threshold = 3.0f; warn_theshold = 1.2f; break;
+        case Label_bicycle:     H = 1.2f;    W = 1.0f;  notify_threshold = 3.0f; warn_theshold = 1.2f; break;
+        case Label_car:         H = 1.5f;    W = 2.0f;  notify_threshold = 3.0f; warn_theshold = 1.2f; break;
+        //case Label_motorcycle:  H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        //case Label_bus:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
+        default: return result;  // ignore other objects
     }
+
+    result.is_important = true;
 
     // // reject certain results?
     // float confidence_threshold = ;
@@ -413,9 +439,10 @@ Process_Result process_result(object_detect_result *det_result) {
     float D_h = f * (H / h);    // distance based on width
     float D_w = f * (W / w);    // distance based on height
 
-    float D = D_h;  // TODO: figure out which result to use
+    float D = D_w;  // TODO: figure out which result to use
 
-    Process_Result result = {};
+    result.D_h = D_h;
+    result.D_w = D_w;
     if (D < warn_theshold) {
         result.haptic_state = Haptic_Fast;
     } else if (D < notify_threshold) {
@@ -492,10 +519,12 @@ void* camera_thread_porc(void* data) {
         arena_printf(&builder,
             "\"frame_count\": %zu,"
             "\"sent_count\": %zu,"
-            "\"fps\": %f,",
+            "\"fps\": %f,"
+            "\"test_is_running\": %d,",
             frame_count,
             sent_count,
-            fps);
+            fps,
+            state->test_is_running);
         arena_printf(&builder, "\"results\": [");
 
         Haptic_Motor_State s0 = Haptic_Stop;
@@ -503,11 +532,14 @@ void* camera_thread_porc(void* data) {
         Haptic_Motor_State s2 = Haptic_Stop;
         Haptic_Motor_State s3 = Haptic_Stop;
 
-        Drive_State drive_state = state->drive_default_state;
+        Drive_State drive_state = state->test_is_running ? Drive_Forward : Drive_Stop;
 
+        int item_count = 0;
         for (int i = 0; i < od_results.count; i++) {
             object_detect_result *det_result = &od_results.results[i];
             Process_Result result = process_result(det_result);
+            if (!result.is_important) continue;
+
             float horizontal_position = result.pos_x / image.width;
             if (horizontal_position < 0.33) {
                 // left
@@ -527,31 +559,42 @@ void* camera_thread_porc(void* data) {
                 drive_state = Drive_SideLeft;
             }
 
-            if (i > 0) arena_push_char(&builder, ',');
+            if (item_count > 0) arena_push_char(&builder, ',');
+            ++item_count;
             arena_printf(&builder,
-                "{\"class\": \"%s\","
+                "{"
+                "\"class\": \"%s\","
                 "\"minx\": %d,"
                 "\"miny\": %d,"
                 "\"maxx\": %d,"
                 "\"maxy\": %d,"
-                "\"confidence\": %.3f}",
+                "\"confidence\": %.3f,"
+                "\"D_h\": %.3f,"
+                "\"D_w\": %.3f"
+                "}",
                 label_get_name(det_result->cls_id),
                 det_result->box.left,
                 det_result->box.top,
                 det_result->box.right,
                 det_result->box.bottom,
-                det_result->prop);
+                det_result->prop,
+                result.D_h,
+                result.D_w);
         }
 
+        // set haptic and drive states
         Haptic_States haptic_states = haptic_motor_pack_states(s0, s1, s2, s3);
-        if (haptic_states != state->current_haptic_states) {
-            // TODO: send states to ESP32
-            state->current_haptic_states = haptic_states;
+        if (!send_haptic_states(state, haptic_states)) {
+            // log_error("Failed to send haptic states to esp32\n");
+        }
+        if (state->test_is_running) {
+            drive_set_state(state, drive_state);
         }
 
-        // TODO: set drive train state
-
-        arena_push_char(&builder, ']');
+        arena_printf(&builder,
+            "],"
+            "\"drive_state\": %d",
+            state->drive_current_state);
         arena_push_char(&builder, '}');
 
         state_sse_write_message(state, "stream_info", (string){builder.base, builder.used});
@@ -565,21 +608,23 @@ end:
     return NULL;
 }
 
-int tcp_socket_connect(uint32_t addr, uint16_t port) {
+int create_non_blocking_tcp_socket() {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         log_error("socket() failed: %s\n", strerror(errno));
         goto error;
     }
-    struct sockaddr_in addr_in = {
-        .sin_family = AF_INET,
-        .sin_port = htons(port),
-        .sin_addr.s_addr = addr,
-    };
-    if (connect(fd, (struct sockaddr*)&addr_in, sizeof(addr_in)) < 0) {
-        log_error("connect() failed: %s\n", strerror(errno));
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        log_error("fcntl(F_GETFL) failed: %s\n", strerror(errno));
         goto error;
     }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        log_error("fcntl(F_SETFL) failed: %s\n", strerror(errno));
+        goto error;
+    }
+
     return fd;
 
 error:
@@ -587,26 +632,42 @@ error:
     return -1;
 }
 
+bool tcp_socket_connect(int fd, uint32_t addr, uint16_t port) {
+    struct sockaddr_in addr_in = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr.s_addr = addr,
+    };
+    return connect(fd, (struct sockaddr*)&addr_in, sizeof(addr_in)) == 0;
+}
+
 void* message_thread_proc(void* data) {
     App_State* state = data;
 
     struct timespec start_time = get_time();
 
+    int sock_fd = create_non_blocking_tcp_socket();
+
     while (!state->should_close) {
         float secs = time_diff(get_time(), start_time);
 
         if (state->esp_connection < 0) {
+            if (state->esp_reconnect) {
+                close(sock_fd);
+                sock_fd = create_non_blocking_tcp_socket();
+            }
             uint32_t addr = *(uint32_t*)(uint8_t[4]){192, 168, 4, 1};
             uint16_t port = 8080;
-            log_print("Connecting to esp32, addr: " ADDR_PRI ":%u\n", ADDR_ARG(addr), port);
-            state->esp_connection = tcp_socket_connect(addr, port);
+            log_print("[%f] Connecting to esp32, addr: " ADDR_PRI ":%u\n", secs,  ADDR_ARG(addr), port);
+            if (tcp_socket_connect(sock_fd, addr, port)) {
+                log_print("esp32 socket connected\n");
+                state->esp_connection = sock_fd;
+            } else {
+                log_error("connect() failed: %s\n", strerror(errno));
+            }
         }
 
         sleep(2);
-    }
-    if (state->esp_connection >= 0) {
-        close(state->esp_connection);
-        state->esp_connection = -1;
     }
 
     return NULL;
@@ -634,7 +695,7 @@ int main(void) {
     state.drive_train_uart = port;
 
     // init connection fd to -1
-    state->esp_connection = -1;
+    state.esp_connection = -1;
 
     Thread* server_thread = thread_start(server_thread_porc, &state);
     if (!server_thread) {

@@ -45,7 +45,7 @@ g++ -o camera \
 
 echo "Building camera server..."
 
-gcc $COMMON_FLAGS $INCLUDES_PATHS -c camera_webserver.c
+gcc $COMMON_FLAGS $INCLUDES_PATHS -c camera_webserver.c -Wno-unused
 g++ -o camera_webserver \
     camera_webserver.o \
     image_utils.o \
