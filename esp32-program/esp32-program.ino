@@ -25,7 +25,7 @@ void set_output_states(uint8_t states) {
   Serial.printf("Got byte value: %u\n", states);
 
   for (int i = 0; i < HAPTIC_MOTOR_COUNT; ++i) {
-    int state = (state >> (i * HAPTIC_STATE_BITS)) & HAPTIC_STATE_BIT_MASK;
+    int state = (states >> (i * HAPTIC_STATE_BITS)) & HAPTIC_STATE_BIT_MASK;
     switch (state) {
       case Haptic_Stop:
         controls[i].interval_ms = 0;
@@ -82,12 +82,13 @@ void loop() {
     if (dt_ms > o->interval_ms) {
       o->last_interval = now;
     }
-    digitalWrite(o->pin, dt_ms < o->duration_ms);
+    digitalWrite(o->pin, o->duration_ms > 0 && dt_ms < o->duration_ms);
   }
 
   if (Serial.available()) {
     int ch = Serial.read();
     switch (ch) {
+      case '0': memset(controls, 0, sizeof(controls)); break;
       case '1': digitalWrite(OUT1_PIN, !digitalRead(OUT1_PIN)); break;
       case '2': digitalWrite(OUT2_PIN, !digitalRead(OUT2_PIN)); break;
       case '3': digitalWrite(OUT3_PIN, !digitalRead(OUT3_PIN)); break;
@@ -114,56 +115,7 @@ void loop() {
   }
 
   while (connection.available()) {
-    // int output_state = connection.read();
-    // Serial.printf("Got output command: %d\n", output_state);
-    // digitalWrite(OUT1_PIN, output_state & Output1);
-    // digitalWrite(OUT2_PIN, output_state & Output2);
-    // digitalWrite(OUT3_PIN, output_state & Output3);
-    // digitalWrite(OUT4_PIN, output_state & Output4);
-
     int haptic_states = connection.read();
     set_output_states(haptic_states);
-
-    // switch (ch) {
-    //   case '1': digitalWrite(OUT1_PIN, !digitalRead(OUT1_PIN)); break;
-    //   case '2': digitalWrite(OUT2_PIN, !digitalRead(OUT2_PIN)); break;
-    //   case '3': digitalWrite(OUT3_PIN, !digitalRead(OUT3_PIN)); break;
-    //   case '4': digitalWrite(OUT4_PIN, !digitalRead(OUT4_PIN)); break;
-    // }
   }
 }
-
-/*
-
-// Old code for testing 
-
-const int port = 8080;
-String host = "";
-
-void connect_wifi() {
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-void try_connect() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (host == "") return;
-  Serial.printf("Try to connect to host: %s\n", host.c_str());
-  if (connection.connect(host.c_str(), port)) {
-    Serial.println("connected");
-    connection.print("ESP hello from esp");
-  } else {
-    Serial.println("connect failed");
-  }
-}
-
-*/
