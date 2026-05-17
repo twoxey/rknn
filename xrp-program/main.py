@@ -29,6 +29,8 @@ def set_effort(fl: float, fr: float, bl: float, br: float):
     motorBR.set_effort(br)
 
 def on_data_write(data: bytes):
+    global output_effort
+
     (drive_command,) = struct.unpack("B", data)
     print(drive_command)
 
