@@ -18,6 +18,8 @@ typedef enum {
     Drive_TurnLeft,
     Drive_TurnRight,
     Drive_Backward,
+    Drive_HighSpeed,
+    Drive_LowSpeed,
 } Drive_State;
 
 enum ESP_Output_Value {
@@ -306,6 +308,8 @@ void on_get_request(Connection* connection, string url, void* data) {
     else if (string_eq(url, string_from_cstr("/Drive_TurnLeft")))     { handle_drive_state_request(connection, state, Drive_TurnLeft);  }
     else if (string_eq(url, string_from_cstr("/Drive_TurnRight")))    { handle_drive_state_request(connection, state, Drive_TurnRight); }
     else if (string_eq(url, string_from_cstr("/Drive_Backward")))     { handle_drive_state_request(connection, state, Drive_Backward);  }
+    else if (string_eq(url, string_from_cstr("/Drive_HighSpeed")))    { handle_drive_state_request(connection, state, Drive_HighSpeed); }
+    else if (string_eq(url, string_from_cstr("/Drive_LowSpeed")))     { handle_drive_state_request(connection, state, Drive_LowSpeed);  }
 
     else if (string_eq(url, string_from_cstr("/0"))) { handle_esp_output_request(connection, state, 0); }
     else if (string_eq(url, string_from_cstr("/1"))) { handle_esp_output_request(connection, state, 1); }
@@ -411,9 +415,10 @@ Process_Result process_result(object_detect_result *det_result) {
     float H, W;
     float notify_threshold, warn_theshold;
     switch (det_result->cls_id) {
-        case Label_person:      H = 1.7f;    W = 0.5f;  notify_threshold = 3.0f; warn_theshold = 1.2f; break;
-        case Label_bicycle:     H = 1.2f;    W = 1.0f;  notify_threshold = 3.0f; warn_theshold = 1.2f; break;
-        case Label_car:         H = 1.5f;    W = 2.0f;  notify_threshold = 3.0f; warn_theshold = 1.2f; break;
+        case Label_person:      H = 1.7f;    W = 0.5f;  notify_threshold = 1.5f; warn_theshold = 1.0f;  break;
+        case Label_bicycle:     H = 1.2f;    W = 1.0f;  notify_threshold = 2.5f; warn_theshold = 1.5f;  break;
+        case Label_car:         H = 1.5f;    W = 2.0f;  notify_threshold = 4.0f; warn_theshold = 2.0f;  break;
+        case Label_stop_sign:   H = 3.0f;    W = 0.5f;  notify_threshold = 1.0f; warn_theshold = 0.5f;  break;
         //case Label_motorcycle:  H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
         //case Label_bus:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
         default: return result;  // ignore other objects

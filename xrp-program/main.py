@@ -12,6 +12,8 @@ _DRIVE_SIDERIGHT = const(3)
 _DRIVE_TURNLEFT  = const(4)
 _DRIVE_TURNRIGHT = const(5)
 _DRIVE_BACKWARD  = const(6)
+_DRIVE_HIGHSPEED = const(7)
+_DRIVE_LOWSPEED  = const(8)
 
 motorFL = EncodedMotor.get_default_encoded_motor(index=1)
 motorFR = EncodedMotor.get_default_encoded_motor(index=2)
@@ -36,6 +38,8 @@ def on_data_write(data: bytes):
     elif drive_command == _DRIVE_TURNLEFT:  set_effort( output_effort, -output_effort,  output_effort, -output_effort)
     elif drive_command == _DRIVE_TURNRIGHT: set_effort(-output_effort,  output_effort, -output_effort,  output_effort)
     elif drive_command == _DRIVE_BACKWARD:  set_effort(-output_effort, -output_effort, -output_effort, -output_effort)
+    elif drive_command == _DRIVE_HIGHSPEED: output_effort = -1.0
+    elif drive_command == _DRIVE_LOWSPEED:  output_effort = -0.6
     else:                                   set_effort(0, 0, 0, 0) # drive_command == _DRIVE_STOP
 
 # ble_receiver = BleReceiver("XrpDrive", "a0ba6193-d014-4eee-aa99-13c6b3b49711", on_data_write)
