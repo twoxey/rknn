@@ -415,10 +415,10 @@ Process_Result process_result(object_detect_result *det_result) {
     float H, W;
     float notify_threshold, warn_theshold;
     switch (det_result->cls_id) {
-        case Label_person:      H = 1.7f;    W = 0.5f;  notify_threshold = 1.5f; warn_theshold = 1.0f;  break;
-        case Label_bicycle:     H = 1.2f;    W = 1.0f;  notify_threshold = 2.5f; warn_theshold = 1.5f;  break;
-        case Label_car:         H = 1.5f;    W = 2.0f;  notify_threshold = 4.0f; warn_theshold = 2.0f;  break;
-        case Label_stop_sign:   H = 3.0f;    W = 0.5f;  notify_threshold = 1.0f; warn_theshold = 0.5f;  break;
+        case Label_person:      H = 1.7f;    W = 0.5f;  notify_threshold = 2.0f; warn_theshold = 1.5f;  break;
+        case Label_bicycle:     H = 1.2f;    W = 1.0f;  notify_threshold = 3.0f; warn_theshold = 2.0f;  break;
+        case Label_car:         H = 1.5f;    W = 2.0f;  notify_threshold = 4.0f; warn_theshold = 2.5f;  break;
+        case Label_stop_sign:   H = 3.0f;    W = 0.5f;  notify_threshold = 1.2f; warn_theshold = 1.0f;  break;
         //case Label_motorcycle:  H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
         //case Label_bus:         H = ;    W = ;  notify_threshold = ; warn_theshold = ; break;
         default: return result;  // ignore other objects
